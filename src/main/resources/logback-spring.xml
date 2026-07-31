@@ -14,6 +14,9 @@
     <!-- 控制台彩色输出 -->
     <conversionRule conversionWord="clr"
                     converterClass="org.springframework.boot.logging.logback.ColorConverter"/>
+    <!-- 注册 %wEx 转换器：Spring Boot 提供的异常堆栈美化输出 -->
+    <conversionRule conversionWord="wEx"
+                    converterClass="org.springframework.boot.logging.logback.ExtendedWhitespaceThrowableProxyConverter"/>
     <property name="CONSOLE_PATTERN"
               value="%clr(%d{yyyy-MM-dd HH:mm:ss.SSS}){faint} %clr(%5p) %clr([%15.15t]){faint} %clr(%-40.40logger{39}){cyan} %clr(:){faint} %m%n%wEx"/>
 
