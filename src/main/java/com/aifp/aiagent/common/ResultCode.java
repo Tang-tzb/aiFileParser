@@ -44,7 +44,12 @@ public enum ResultCode {
 
     // 业务模块段：4xxx 向量检索
     VECTOR_STORE_ERROR(4001, "向量存储操作失败"),
-    VECTOR_RETRIEVE_ERROR(4002, "向量检索失败");
+    VECTOR_RETRIEVE_ERROR(4002, "向量检索失败"),
+
+    // 业务模块段：5xxx 动态表单
+    FORM_NOT_FOUND(5001, "表单不存在"),
+    FIELD_CODE_DUPLICATE(5002, "字段编码在表单内重复"),
+    FIELD_NOT_FOUND(5003, "字段不存在");
 
     private final Integer code;
     private final String message;
