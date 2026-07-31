@@ -1,0 +1,98 @@
+# ============================================================
+# aiFileParser 应用主配置
+# 说明：敏感信息采用 ${ENV:默认值} 占位符，从环境变量读取，
+#       本地开发可使用默认值；生产环境务必通过环境变量注入。
+# ============================================================
+server:
+  port: 8080
+  servlet:
+    context-path: /aifp
+  tomcat:
+    max-swallow-size: 100MB          # 上传大文件兜底
+    max-http-form-post-size: 100MB
+
+spring:
+  application:
+    name: aiFileParser
+
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+
+  # ---------------- 文件上传限制 ----------------
+  servlet:
+    multipart:
+      enabled: true
+      max-file-size: 100MB
+      max-request-size: 100MB
+
+  # ---------------- 数据源 (MySQL 8.0.46) ----------------
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:aifileparser}?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&rewriteBatchedStatements=true
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:root}
+    hikari:
+      pool-name: AiFileParserHikariCP
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  # ---------------- Spring AI / Qwen-Plus (DashScope) ----------------
+  ai:
+    dashscope:
+      # 阿里云百炼平台 API Key，务必通过环境变量注入
+      api-key: ${AI_DASHSCOPE_API_KEY:}
+      chat:
+        options:
+          # 默认模型：通义千问 Qwen-Plus
+          model: qwen-plus
+          # 字段抽取场景偏稳定，温度调低
+          temperature: 0.3
+          top-p: 0.8
+
+# ============================================================
+# MyBatis-Plus 配置
+# ============================================================
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  type-aliases-package: com.aifp.aiagent.entity
+  global-config:
+    banner: false
+    db-config:
+      # 主键策略：雪花算法 assign_id
+      id-type: assign_id
+      # 逻辑删除字段
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+      # 表名下划线
+      table-underline: true
+  configuration:
+    map-underscore-to-camel-case: true
+    # 开发环境打印 SQL（生产通过 profile 关闭）
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+
+# ============================================================
+# 日志（与 logback-spring.xml 配合，此处仅控制级别）
+# ============================================================
+logging:
+  config: classpath:logback-spring.xml
+  level:
+    root: INFO
+    com.aifp.aiagent: DEBUG
+    org.springframework.web: INFO
+    com.baomidou.mybatisplus: WARN
+
+# ============================================================
+# Actuator 健康检查（仅暴露必要端点）
+# ============================================================
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
