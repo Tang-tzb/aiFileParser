@@ -89,3 +89,46 @@ CREATE TABLE IF NOT EXISTS form_field_definition
     form_id
 )
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='表单字段定义表';
+
+-- ---------------- 文件记录表 ----------------
+CREATE TABLE IF NOT EXISTS file_record
+(
+    id
+    BIGINT
+    NOT
+    NULL
+    COMMENT
+    '主键ID(雪花算法)',
+    file_name
+    VARCHAR
+(
+    255
+) NOT NULL COMMENT '原始文件名',
+    file_type VARCHAR
+(
+    20
+) NOT NULL COMMENT '文件类型:PDF/EXCEL/WORD/OTHER',
+    file_path VARCHAR
+(
+    500
+) NOT NULL COMMENT '存储相对路径',
+    status VARCHAR
+(
+    20
+) NOT NULL DEFAULT 'UPLOADED' COMMENT '状态:UPLOADED/PARSING/VECTORING/EXTRACTING/SUCCESS/FAILED',
+    create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    deleted TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除:0正常 1删除',
+    PRIMARY KEY
+(
+    id
+),
+    KEY idx_file_status
+(
+    status
+),
+    KEY idx_file_type
+(
+    file_type
+)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件记录表';

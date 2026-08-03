@@ -39,3 +39,6 @@ application-prod.yml
 
 # Build
 build/
+
+# Uploads (运行时生成的上传文件)
+/uploads/
