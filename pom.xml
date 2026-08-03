@@ -26,6 +26,9 @@
         <spring-ai-alibaba.version>1.0.0.2</spring-ai-alibaba.version>
         <!-- MyBatis-Plus Spring Boot 3 专用 starter -->
         <mybatis-plus.version>3.5.16</mybatis-plus.version>
+        <!-- 文件解析：PDFBox / POI（Spring Boot BOM 未托管，需显式版本） -->
+        <pdfbox.version>3.0.4</pdfbox.version>
+        <poi.version>5.3.0</poi.version>
     </properties>
 
     <!-- 统一依赖版本管理：Spring AI BOM，后续可在此追加 Milvus / PgVector 等向量存储 -->
@@ -81,6 +84,18 @@
             <groupId>com.alibaba.cloud.ai</groupId>
             <artifactId>spring-ai-alibaba-starter-dashscope</artifactId>
             <version>${spring-ai-alibaba.version}</version>
+        </dependency>
+
+        <!-- ============ 文件解析: PDFBox / POI ============ -->
+        <dependency>
+            <groupId>org.apache.pdfbox</groupId>
+            <artifactId>pdfbox</artifactId>
+            <version>${pdfbox.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>${poi.version}</version>
         </dependency>
 
         <!-- ============ 工具 ============ -->
