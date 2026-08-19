@@ -10,6 +10,7 @@ target/
 *.iml
 *.ipr
 out/
+.trae/
 
 # IDE - Eclipse
 .apt_generated

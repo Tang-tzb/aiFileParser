@@ -98,6 +98,12 @@
             <version>${poi.version}</version>
         </dependency>
 
+        <!-- ============ RAG 向量存储: Milvus（版本由 spring-ai-bom 托管） ============ -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-starter-vector-store-milvus</artifactId>
+        </dependency>
+
         <!-- ============ 工具 ============ -->
         <dependency>
             <groupId>org.projectlombok</groupId>

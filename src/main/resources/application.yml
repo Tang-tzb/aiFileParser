@@ -51,6 +51,31 @@ spring:
           # 字段抽取场景偏稳定，温度调低
           temperature: 0.3
           top-p: 0.8
+      embedding:
+        options:
+          # DashScope 文本向量模型（1536 维）；须与 milvus.embedding-dimension 一致
+          model: text-embedding-v2
+    vectorstore:
+      milvus:
+        client:
+          host: ${MILVUS_HOST:localhost}
+          port: ${MILVUS_PORT:19530}
+          username: ${MILVUS_USERNAME:root}
+          password: ${MILVUS_PASSWORD:milvus}
+        database-name: default
+        collection-name: aifp_doc_chunks
+        embedding-dimension: 1536
+        index-type: IVF_FLAT
+        metric-type: COSINE
+        initialize-schema: true
+
+# ============================================================
+# RAG 切片参数
+# ============================================================
+rag:
+  chunk:
+    size: ${RAG_CHUNK_SIZE:800}
+    overlap: ${RAG_CHUNK_OVERLAP:200}
 
 # ============================================================
 # MyBatis-Plus 配置
