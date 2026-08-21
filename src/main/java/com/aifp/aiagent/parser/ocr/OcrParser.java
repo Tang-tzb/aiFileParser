@@ -9,7 +9,7 @@ import java.io.File;
  * {@link com.aifp.aiagent.parser.FileParser} 的 FileType 策略选择。
  * 后续接入 PaddleOCR 时实现该接口即可，无需改动现有解析器。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 public interface OcrParser {
 

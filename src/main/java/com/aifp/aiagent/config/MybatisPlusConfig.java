@@ -12,7 +12,7 @@ import org.springframework.context.annotation.Configuration;
  * <p>
  * 注册分页与乐观锁拦截器，保证分页 SQL 与并发更新安全。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Configuration
 public class MybatisPlusConfig {

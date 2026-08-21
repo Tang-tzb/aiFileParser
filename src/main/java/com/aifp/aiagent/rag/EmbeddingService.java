@@ -9,7 +9,7 @@ import java.util.List;
  * 供后续阶段手动打分/检索使用；注意 {@code VectorStore.similaritySearch}
  * 内部会自行 embed 查询，无需重复调用。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 public interface EmbeddingService {
 

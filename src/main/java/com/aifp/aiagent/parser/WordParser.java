@@ -20,7 +20,7 @@ import java.io.IOException;
  * 仅支持 {@code .docx}（XWPF），遍历段落抽取文本，{@code page=段落数}。
  * 旧版 {@code .doc} 不支持，抛 {@code FILE_PARSE_ERROR}。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Slf4j
 @Component

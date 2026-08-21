@@ -17,7 +17,7 @@ import java.util.List;
  * <p>
  * Spring AI 1.0.0 中 {@code embed(String)} 返回 {@code float[]}。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Slf4j
 @Service

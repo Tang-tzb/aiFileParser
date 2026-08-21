@@ -16,7 +16,7 @@ import java.io.Serializable;
  * 用于 create-form 的可选字段列表，以及 add-field 接口入参。
  * {@code fieldCode} 约束为合法标识符，便于后续作为 JSON key 与 Java 属性名。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 public class FormFieldCreateDTO implements Serializable {

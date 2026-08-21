@@ -10,7 +10,7 @@ import java.io.Serializable;
  * <p>
  * 各文件解析器输出该统一模型，供后续阶段（语义分块、向量化、字段抽取）使用。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 public class ParserDocument implements Serializable {

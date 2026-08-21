@@ -11,7 +11,7 @@ import java.time.LocalDateTime;
 /**
  * 文件上传结果 VO
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 public class FileUploadVO implements Serializable {

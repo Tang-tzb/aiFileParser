@@ -12,7 +12,7 @@ import lombok.EqualsAndHashCode;
  * 对应表 file_record：上传文件的元数据与处理状态。
  * 后续解析阶段通过 {@link FileStatus} 流转状态，并据 {@link FileType} 选择 Parser。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 @EqualsAndHashCode(callSuper = true)

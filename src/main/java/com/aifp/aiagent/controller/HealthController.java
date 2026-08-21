@@ -14,7 +14,7 @@ import java.util.Map;
  * 仅用于验证工程是否可启动、统一返回 {@link Result} 与异常链路是否正常，
  * 不属于业务功能。后续阶段可删除或保留。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @RestController
 @RequestMapping("/health")

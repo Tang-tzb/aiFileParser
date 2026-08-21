@@ -12,7 +12,7 @@ import lombok.EqualsAndHashCode;
  * {@code fieldCode} + {@code fieldType} + {@code description} 为后续 AI 抽取
  * Prompt 与 JSON Schema 生成的核心输入。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 @EqualsAndHashCode(callSuper = true)

@@ -13,7 +13,7 @@ import java.time.LocalDateTime;
  * 统一主键策略（雪花算法 assign_id）、审计时间与逻辑删除字段。
  * 子类继承即可，无需重复声明。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 public abstract class BaseEntity implements Serializable {

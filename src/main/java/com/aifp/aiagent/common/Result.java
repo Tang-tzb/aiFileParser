@@ -13,7 +13,7 @@ import java.io.Serializable;
  * 通过静态工厂方法构造，避免暴露构造细节，保证不可变语义。
  *
  * @param <T> 业务数据类型
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 @NoArgsConstructor

@@ -11,7 +11,7 @@ import java.io.File;
  * 本阶段未接入真实 OCR，调用即抛 {@link UnsupportedOperationException}，
  * 作为后续 PaddleOCR 集成的占位 bean。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Slf4j
 @Component

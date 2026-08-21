@@ -70,12 +70,15 @@ spring:
         initialize-schema: true
 
 # ============================================================
-# RAG 切片参数
+# RAG 切片与检索参数
 # ============================================================
 rag:
   chunk:
     size: ${RAG_CHUNK_SIZE:800}
     overlap: ${RAG_CHUNK_OVERLAP:200}
+  retrieve:
+    # 每字段 Milvus 检索条数，默认 5 平衡上下文与成本
+    topK: ${RAG_RETRIEVE_TOPK:5}
 
 # ============================================================
 # MyBatis-Plus 配置

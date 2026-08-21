@@ -11,7 +11,7 @@ import java.time.LocalDateTime;
 /**
  * 文件记录展示 VO（完整记录，供查询/后续阶段复用）
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 public class FileRecordVO implements Serializable {

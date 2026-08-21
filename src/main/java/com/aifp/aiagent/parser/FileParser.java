@@ -11,7 +11,7 @@ import java.io.File;
  * 每个实现对应一种 {@link FileType}，由 {@link FileParserRegistry} 按
  * {@link #supportedType()} 自动选择（策略模式）。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 public interface FileParser {
 

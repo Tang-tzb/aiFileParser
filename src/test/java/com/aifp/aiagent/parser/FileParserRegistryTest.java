@@ -12,7 +12,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * {@link FileParserRegistry} 策略选择测试
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 class FileParserRegistryTest {
 

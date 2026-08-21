@@ -9,7 +9,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 /**
  * {@link PaddleOcrParser} 桩行为测试
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 class PaddleOcrParserTest {
 

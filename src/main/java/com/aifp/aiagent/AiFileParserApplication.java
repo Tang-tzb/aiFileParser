@@ -11,7 +11,7 @@ import org.springframework.transaction.annotation.EnableTransactionManagement;
  * 职责单一：仅负责应用引导、Mapper 扫描与事务开启。
  * 业务装配交给 Spring Boot 自动配置完成。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @SpringBootApplication
 @MapperScan("com.aifp.aiagent.repository")

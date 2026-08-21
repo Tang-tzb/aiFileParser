@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * 用 PDFBox 生成含文本的单页 PDF，再解析验证。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 class PdfParserTest {
 

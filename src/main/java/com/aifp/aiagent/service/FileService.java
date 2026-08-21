@@ -11,7 +11,7 @@ import org.springframework.web.multipart.MultipartFile;
  * 负责文件上传、类型判断、记录保存与状态管理。
  * 不与 AI 解析耦合；状态流转方法供阶段 4/5/6 调用。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 public interface FileService {
 

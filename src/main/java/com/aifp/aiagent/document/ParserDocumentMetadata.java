@@ -17,7 +17,7 @@ import java.io.Serializable;
  *   <li>Word：段落数</li>
  * </ul>
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 @Builder
@@ -40,4 +40,12 @@ public class ParserDocumentMetadata implements Serializable {
      * 文件类型
      */
     private FileType type;
+
+    /**
+     * 文件记录ID（file_record 主键）
+     * <p>
+     * 由 DocumentIngestionService 在入库前注入，解析器（PdfParser 等）不感知该字段。
+     * 用于 chunk 元数据写入，供检索阶段按文件过滤。
+     */
+    private Long fileId;
 }

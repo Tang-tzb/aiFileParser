@@ -10,7 +10,7 @@ import java.util.List;
 /**
  * 表单详情展示 VO（含字段列表）
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 public class FormVO implements Serializable {

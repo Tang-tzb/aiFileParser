@@ -14,7 +14,7 @@ import java.time.LocalDateTime;
  * - 更新时填充 updateTime
  * 业务代码无需手动设置审计时间。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Component
 public class MybatisMetaObjectHandler implements MetaObjectHandler {

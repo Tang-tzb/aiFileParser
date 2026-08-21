@@ -18,7 +18,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * 用 POI XWPF 生成 2 段的 docx，再解析验证。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 class WordParserTest {
 

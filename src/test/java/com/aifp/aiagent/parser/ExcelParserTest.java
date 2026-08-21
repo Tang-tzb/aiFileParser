@@ -20,7 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>
  * 用 POI 生成 1 sheet 2 行的 xlsx，再解析验证。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 class ExcelParserTest {
 

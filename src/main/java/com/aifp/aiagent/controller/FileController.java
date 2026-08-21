@@ -15,7 +15,7 @@ import org.springframework.web.multipart.MultipartFile;
  * <p>
  * 完整路径前缀：/aifp（context-path）+ /file
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @RestController
 @RequestMapping("/file")

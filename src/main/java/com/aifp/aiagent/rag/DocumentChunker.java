@@ -27,7 +27,7 @@ import java.util.Map;
  * 注意：cl100k_base 为 GPT 系分词，对 Qwen 等模型为近似计数（Spring AI 的
  * TokenTextSplitter 同样使用 cl100k_base）。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Slf4j
 @Component
@@ -105,10 +105,12 @@ public class DocumentChunker {
             String text, ParserDocumentMetadata meta, int chunkIndex, int totalChunks) {
         // 元数据值类型保持与原字段语义一致：文本类用 String，数值类用 Integer，
         // 便于 Milvus 元数据过滤及后续 AI Prompt 生成时保留数值语义。
+        // fileId 存为 String，便于 Milvus 标量过滤表达式 file == 'xxx'。
         Map<String, Object> chunkMeta = Map.of(
                 "fileName", nullSafe(meta.getFileName()),
                 "fileType", nullSafe(meta.getType()),
                 "page", meta.getPage(),
+                "fileId", nullSafe(meta.getFileId()),
                 "chunkIndex", chunkIndex,
                 "totalChunks", totalChunks
         );

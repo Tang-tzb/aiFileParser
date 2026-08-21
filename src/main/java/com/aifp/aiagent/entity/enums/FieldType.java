@@ -10,7 +10,7 @@ import lombok.Getter;
  * 设计要点：每个类型携带 {@code jsonSchemaType}，为后续阶段将字段定义转换为
  * JSON Schema / AI 抽取 Prompt 提供直接映射，无需再写映射表。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Getter
 @AllArgsConstructor

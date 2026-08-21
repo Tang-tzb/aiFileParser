@@ -20,7 +20,7 @@ import java.io.IOException;
  * 使用 {@link PDFTextStripper} 抽取文本，{@code page=文档页数}。
  * 注意：扫描版 PDF（图片型）抽取结果为空，后续可由 OCR 接管，本阶段不处理。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Slf4j
 @Component

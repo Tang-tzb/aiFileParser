@@ -12,7 +12,7 @@ import java.util.Set;
  * 用于 {@code file_record.file_type} 列，决定阶段 4 调用哪个 Parser。
  * 每个类型关联其合法扩展名集合，供上传时扩展名校验。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Getter
 @AllArgsConstructor

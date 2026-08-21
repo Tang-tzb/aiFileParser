@@ -42,7 +42,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * (不支持类型→2002、空文件/上传失败→2003)，验证 multipart 绑定、枚举序列化与
  * BusinessException 转 Result 链路。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @ExtendWith(MockitoExtension.class)
 class FileControllerTest {

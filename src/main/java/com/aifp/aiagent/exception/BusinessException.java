@@ -15,7 +15,7 @@ import java.io.Serial;
  *   throw new BusinessException(ResultCode.AI_INVOKE_ERROR, "Qwen 调用超时");
  * </pre>
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Getter
 public class BusinessException extends RuntimeException {

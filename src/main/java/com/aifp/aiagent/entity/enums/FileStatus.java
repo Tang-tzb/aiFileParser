@@ -11,7 +11,7 @@ import lombok.Getter;
  * 流转：UPLOADED → PARSING → VECTORING → EXTRACTING → SUCCESS / FAILED。
  * 本阶段（阶段 3）仅使用 UPLOADED，其余状态供阶段 4/5/6 调用 updateStatus 流转。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Getter
 @AllArgsConstructor

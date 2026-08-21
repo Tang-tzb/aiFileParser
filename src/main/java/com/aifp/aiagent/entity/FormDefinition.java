@@ -9,7 +9,7 @@ import lombok.EqualsAndHashCode;
  * <p>
  * 对应表 form_definition：用户自定义的业务表单元信息（如"项目申报表"）。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Data
 @EqualsAndHashCode(callSuper = true)

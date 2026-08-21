@@ -10,7 +10,7 @@ import org.springframework.web.multipart.MultipartFile;
  * 存储层抽象，本地实现见 {@link LocalFileStorageService}。
  * 后续如需 OSS/S3，新增实现类即可，无需改动 {@code FileService}。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 public interface FileStorageService {
 

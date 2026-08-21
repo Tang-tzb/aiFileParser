@@ -18,7 +18,7 @@ import java.util.stream.Collectors;
  * 构建 {@code FileType → FileParser} 映射，{@link #get(FileType)} 自动选择对应解析器。
  * 未注册类型抛 {@link ResultCode#FILE_TYPE_NOT_SUPPORT}。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Slf4j
 @Component

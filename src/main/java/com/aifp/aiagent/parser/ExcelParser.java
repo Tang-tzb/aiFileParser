@@ -18,7 +18,7 @@ import java.io.IOException;
  * 使用 {@link WorkbookFactory} 自动识别 xls/xlsx，按"工作表→行"以制表符拼装文本，
  * {@code page=工作表数}，便于后续 AI 字段抽取。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 @Slf4j
 @Component

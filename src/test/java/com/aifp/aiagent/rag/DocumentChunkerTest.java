@@ -14,9 +14,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * {@link DocumentChunker} 切片测试（确定性，无需外部服务）。
  *
- * @author aiFileParser
+ * @author Tang_tzb
  */
 class DocumentChunkerTest {
+
+    private static final Long FILE_ID = 1785800001L;
 
     private static DocumentChunker chunker;
 
@@ -44,6 +46,7 @@ class DocumentChunkerTest {
         assertThat(chunks.get(0).getText()).contains("简短文本");
         assertThat(chunks.get(0).getMetadata()).containsEntry("chunkIndex", 0);
         assertThat(chunks.get(0).getMetadata()).containsEntry("totalChunks", 1);
+        assertThat(chunks.get(0).getMetadata()).containsEntry("fileId", FILE_ID.toString());
     }
 
     @Test
@@ -80,6 +83,7 @@ class DocumentChunkerTest {
                 .fileName("项目申报书.pdf")
                 .page(3)
                 .type(FileType.PDF)
+                .fileId(FILE_ID)
                 .build();
         ParserDocument doc = new ParserDocument();
         doc.setContent(content);
