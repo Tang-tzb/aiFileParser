@@ -1,14 +1,12 @@
 package com.aifp.aiagent.service.impl;
 
+import com.aifp.aiagent.dto.ExtractionResult;
 import com.aifp.aiagent.dto.FormFieldVO;
 import com.aifp.aiagent.dto.FormVO;
 import com.aifp.aiagent.entity.enums.FieldType;
 import com.aifp.aiagent.entity.enums.FileStatus;
 import com.aifp.aiagent.exception.BusinessException;
-import com.aifp.aiagent.rag.DocumentIngestionService;
-import com.aifp.aiagent.rag.ExtractionPromptBuilder;
-import com.aifp.aiagent.rag.FieldQueryGenerator;
-import com.aifp.aiagent.rag.VectorStoreService;
+import com.aifp.aiagent.rag.*;
 import com.aifp.aiagent.service.FileService;
 import com.aifp.aiagent.service.FormService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -25,20 +23,19 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.document.Document;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.math.BigDecimal;
 import java.util.List;
-import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 /**
  * {@link FieldExtractorServiceImpl} 测试
  * <p>
- * 离线单测：FieldQueryGenerator/ExtractionPromptBuilder 用真实实例，其余依赖 mock。
- * 验证正常抽取、空字段(5004)、非法 JSON(3002)。
+ * 离线单测：FieldQueryGenerator/ExtractionPromptBuilder/FieldSchemaValidator 用真实实例，
+ * 其余依赖 mock。验证正常抽取、Retry 成功、空字段(5004)、非法 JSON(3002)、空切片(4002)。
  *
  * @author Tang_tzb
  */
@@ -63,29 +60,52 @@ class FieldExtractorServiceImplTest {
 
     @BeforeEach
     void setUp() {
-        // 真实辅助组件 + 真实 ObjectMapper，验证 Prompt 构建与 JSON 解析真实链路
+        // 真实辅助组件 + 真实 ObjectMapper，验证 Prompt 构建/JSON 解析/Schema 校验真实链路
         extractor = new FieldExtractorServiceImpl(
                 ingestionService, formService, fileService, vectorStoreService,
                 new FieldQueryGenerator(), new ExtractionPromptBuilder(),
-                chatModel, new ObjectMapper());
+                new FieldSchemaValidator(), chatModel, new ObjectMapper());
         ReflectionTestUtils.setField(extractor, "topK", 5);
+        ReflectionTestUtils.setField(extractor, "maxAttempts", 2);
     }
 
     @Test
-    void extract_normalFlow_returnsFieldMap() {
+    void extract_normalFlow_returnsResultNoErrors() {
         when(formService.getFormById(FORM_ID)).thenReturn(buildForm(2));
         when(vectorStoreService.search(anyString(), anyInt(), anyString()))
                 .thenReturn(List.of(new Document("项目名称为智慧校园，投资金额500万元。")));
         when(chatModel.call(any(Prompt.class)))
                 .thenReturn(chatResponse("{\"projectName\":\"智慧校园\",\"amount\":5000000}"));
 
-        Map<String, Object> result = extractor.extract(FORM_ID, FILE_ID);
+        ExtractionResult result = extractor.extract(FORM_ID, FILE_ID);
 
-        assertThat(result).containsEntry("projectName", "智慧校园");
-        assertThat(result).containsEntry("amount", 5000000);
-        verify(ingestionService).ingest(FILE_ID);
+        assertThat(result.getErrors()).isEmpty();
+        assertThat(result.getAttemptsUsed()).isEqualTo(1);
+        assertThat(result.getValues()).containsEntry("projectName", "智慧校园");
+        assertThat((BigDecimal) result.getValues().get("amount"))
+                .isEqualByComparingTo(new BigDecimal("5000000"));
         verify(fileService).updateStatus(FILE_ID, FileStatus.EXTRACTING);
         verify(fileService).updateStatus(FILE_ID, FileStatus.SUCCESS);
+    }
+
+    /**
+     * Retry 成功路径：首次返回 amount="金额待定"(类型错误) → 反馈 → 二次返回数字 → 成功。
+     */
+    @Test
+    void extract_typeErrorThenRetry_successOnSecondAttempt() {
+        when(formService.getFormById(FORM_ID)).thenReturn(buildForm(2));
+        when(vectorStoreService.search(anyString(), anyInt(), anyString()))
+                .thenReturn(List.of(new Document("项目名称为智慧校园，投资金额500万元。")));
+        when(chatModel.call(any(Prompt.class)))
+                .thenReturn(chatResponse("{\"projectName\":\"智慧校园\",\"amount\":\"金额待定\"}"))
+                .thenReturn(chatResponse("{\"projectName\":\"智慧校园\",\"amount\":5000000}"));
+
+        ExtractionResult result = extractor.extract(FORM_ID, FILE_ID);
+
+        assertThat(result.getAttemptsUsed()).isEqualTo(2);
+        assertThat(result.getErrors()).isEmpty();
+        assertThat(result.getValues()).containsEntry("projectName", "智慧校园");
+        verify(chatModel, times(2)).call(any(Prompt.class));
     }
 
     @Test

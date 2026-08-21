@@ -79,6 +79,10 @@ rag:
   retrieve:
     # 每字段 Milvus 检索条数，默认 5 平衡上下文与成本
     topK: ${RAG_RETRIEVE_TOPK:5}
+  extract:
+    retry:
+      # 抽取结果校验失败后的最大重试次数（含首次共 max-attempts+1 次 LLM 调用），默认 2
+      max-attempts: ${RAG_EXTRACT_RETRY_MAX:2}
 
 # ============================================================
 # MyBatis-Plus 配置

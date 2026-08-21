@@ -1,6 +1,8 @@
 package com.aifp.aiagent.controller;
 
 import com.aifp.aiagent.common.ResultCode;
+import com.aifp.aiagent.dto.ExtractionResult;
+import com.aifp.aiagent.dto.FieldError;
 import com.aifp.aiagent.exception.BusinessException;
 import com.aifp.aiagent.exception.GlobalExceptionHandler;
 import com.aifp.aiagent.service.FieldExtractorService;
@@ -16,6 +18,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.eq;
@@ -30,7 +33,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  * {@link FillController} 测试
  * <p>
  * 采用 standalone MockMvc：手动装配 Controller + GlobalExceptionHandler，不启动 Spring 上下文，可离线运行。
- * 覆盖 {@code POST /fill/{formId}?fileId=xxx}：正向抽取 + 表单不存在(5001) 异常路径。
+ * 覆盖 {@code POST /fill/{formId}?fileId=xxx}：正向抽取(含可靠性元数据) + 表单不存在(5001) 异常路径。
  *
  * @author Tang_tzb
  */
@@ -58,7 +61,7 @@ class FillControllerTest {
     }
 
     @Test
-    void fill_normal_returnsExtractedMap() throws Exception {
+    void fill_normal_returnsExtractionResult() throws Exception {
         when(fieldExtractorService.extract(eq(FORM_ID), eq(FILE_ID)))
                 .thenReturn(buildResult());
 
@@ -66,8 +69,10 @@ class FillControllerTest {
                 .andDo(print())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(200))
-                .andExpect(jsonPath("$.data.projectName").value("智慧校园"))
-                .andExpect(jsonPath("$.data.amount").value(5000000));
+                .andExpect(jsonPath("$.data.values.projectName").value("智慧校园"))
+                .andExpect(jsonPath("$.data.values.amount").value(5000000))
+                .andExpect(jsonPath("$.data.attemptsUsed").value(1))
+                .andExpect(jsonPath("$.data.errors").isEmpty());
 
         verify(fieldExtractorService).extract(FORM_ID, FILE_ID);
     }
@@ -85,10 +90,18 @@ class FillControllerTest {
         verify(fieldExtractorService).extract(FORM_ID, FILE_ID);
     }
 
-    private Map<String, Object> buildResult() {
-        Map<String, Object> map = new LinkedHashMap<>();
-        map.put("projectName", "智慧校园");
-        map.put("amount", 5000000);
-        return map;
+    /**
+     * 构造含类型化值、空错误、1 次调用的可靠性结果。
+     */
+    private ExtractionResult buildResult() {
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("projectName", "智慧校园");
+        values.put("amount", 5000000);
+        List<FieldError> errors = List.of();
+        ExtractionResult r = new ExtractionResult();
+        r.setValues(values);
+        r.setErrors(errors);
+        r.setAttemptsUsed(1);
+        return r;
     }
 }

@@ -1,14 +1,13 @@
 package com.aifp.aiagent.service.impl;
 
 import com.aifp.aiagent.common.ResultCode;
+import com.aifp.aiagent.dto.ExtractionResult;
+import com.aifp.aiagent.dto.FieldError;
 import com.aifp.aiagent.dto.FormFieldVO;
 import com.aifp.aiagent.dto.FormVO;
 import com.aifp.aiagent.entity.enums.FileStatus;
 import com.aifp.aiagent.exception.BusinessException;
-import com.aifp.aiagent.rag.DocumentIngestionService;
-import com.aifp.aiagent.rag.ExtractionPromptBuilder;
-import com.aifp.aiagent.rag.FieldQueryGenerator;
-import com.aifp.aiagent.rag.VectorStoreService;
+import com.aifp.aiagent.rag.*;
 import com.aifp.aiagent.service.FieldExtractorService;
 import com.aifp.aiagent.service.FileService;
 import com.aifp.aiagent.service.FormService;
@@ -34,7 +33,8 @@ import java.util.Map;
  * FieldExtractorService 实现
  * <p>
  * 流程：ingest(幂等) → 读字段 → EXTRACTING → 按字段检索+合并去重 chunks →
- * 动态 Prompt → 单次 ChatModel 调用 → 解析 JSON → Map → SUCCESS。
+ * 动态 Prompt → ChatModel 调用 → JSON 解析 → Schema 校验+智能类型转换 →
+ * 失败按字段错误反馈 Retry → {@link ExtractionResult} → SUCCESS。
  *
  * @author Tang_tzb
  */
@@ -49,14 +49,21 @@ public class FieldExtractorServiceImpl implements FieldExtractorService {
     private final VectorStoreService vectorStoreService;
     private final FieldQueryGenerator fieldQueryGenerator;
     private final ExtractionPromptBuilder extractionPromptBuilder;
+    private final FieldSchemaValidator fieldSchemaValidator;
     private final ChatModel chatModel;
     private final ObjectMapper objectMapper;
 
     @Value("${rag.retrieve.topK:5}")
     private int topK;
 
+    /**
+     * 抽取校验失败后的最大重试次数（含首次共 maxAttempts+1 次 LLM 调用）
+     */
+    @Value("${rag.extract.retry.max-attempts:2}")
+    private int maxAttempts;
+
     @Override
-    public Map<String, Object> extract(Long formId, Long fileId) {
+    public ExtractionResult extract(Long formId, Long fileId) {
         // 幂等：确保文档已入 Milvus
         ingestionService.ingest(fileId);
         List<FormFieldVO> fields = loadFields(formId);
@@ -69,15 +76,46 @@ public class FieldExtractorServiceImpl implements FieldExtractorService {
             throw new BusinessException(ResultCode.VECTOR_RETRIEVE_ERROR, "未检索到相关文档切片");
         }
 
-        // 动态 Prompt → 单次 LLM 调用 → JSON 解析
-        String systemPrompt = extractionPromptBuilder.buildSystemPrompt(fields);
-        String userPrompt = extractionPromptBuilder.buildUserPrompt(chunks);
-        String json = callChatModel(systemPrompt, userPrompt);
-        Map<String, Object> result = parseJson(json);
-
+        // Retry 循环：LLM 调用 → JSON 解析 → Schema 校验 → 失败反馈重试
+        ExtractionResult result = extractWithRetry(fields, chunks);
         fileService.updateStatus(fileId, FileStatus.SUCCESS);
-        log.info("字段抽取完成 formId={}, fileId={}, fields={}", formId, fileId, result.size());
+        log.info("字段抽取完成 formId={}, fileId={}, attempts={}, errors={}",
+                formId, fileId, result.getAttemptsUsed(), result.getErrors().size());
         return result;
+    }
+
+    /**
+     * Retry 循环：每次校验失败把字段错误反馈给 AI 修正，直至无错误或耗尽重试次数。
+     * JSON 解析失败立即抛 3002，不进入字段级 Retry（属响应格式问题，非字段问题）。
+     */
+    private ExtractionResult extractWithRetry(List<FormFieldVO> fields, List<Document> chunks) {
+        String userPrompt = extractionPromptBuilder.buildUserPrompt(chunks);
+        int totalCalls = maxAttempts + 1;
+        FieldSchemaValidator.ValidationResult vr = null;
+        String feedback = null;
+        int used = 0;
+        for (int i = 0; i < totalCalls; i++) {
+            used = i + 1;
+            String systemPrompt = extractionPromptBuilder.buildSystemPrompt(fields, feedback);
+            Map<String, Object> raw = parseJson(callChatModel(systemPrompt, userPrompt));
+            vr = fieldSchemaValidator.validate(raw, fields);
+            if (!vr.hasErrors()) {
+                return buildResult(vr.getCoerced(), List.of(), used);
+            }
+            feedback = extractionPromptBuilder.buildRetryFeedback(vr.getErrors());
+        }
+        return buildResult(vr.getCoerced(), vr.getErrors(), used);
+    }
+
+    /**
+     * 组装 {@link ExtractionResult}。
+     */
+    private ExtractionResult buildResult(Map<String, Object> values, List<FieldError> errors, int used) {
+        ExtractionResult r = new ExtractionResult();
+        r.setValues(values);
+        r.setErrors(errors);
+        r.setAttemptsUsed(used);
+        return r;
     }
 
     /**
