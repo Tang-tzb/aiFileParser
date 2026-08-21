@@ -9,6 +9,7 @@ import com.aifp.aiagent.parser.FileParser;
 import com.aifp.aiagent.parser.FileParserRegistry;
 import com.aifp.aiagent.rag.DocumentChunker;
 import com.aifp.aiagent.rag.DocumentIngestionService;
+import com.aifp.aiagent.rag.ProgressCallback;
 import com.aifp.aiagent.rag.VectorStoreService;
 import com.aifp.aiagent.service.FileService;
 import com.aifp.aiagent.service.storage.FileStorageService;
@@ -43,14 +44,19 @@ public class DocumentIngestionServiceImpl implements DocumentIngestionService {
 
     @Override
     public void ingest(Long fileId) {
+        ingest(fileId, null);
+    }
+
+    @Override
+    public void ingest(Long fileId, ProgressCallback callback) {
         FileRecordVO record = fileService.getById(fileId);
-        // 幂等：已成功入库则跳过，避免重复 chunk
+        // 幂等：已成功入库则跳过，避免重复 chunk；不触发回调（已成功任务无进度可报）
         if (record.getStatus() == FileStatus.SUCCESS) {
             log.info("文件已入库，跳过 fileId={}", fileId);
             return;
         }
         try {
-            doIngest(record);
+            doIngest(record, callback);
         } catch (BusinessException e) {
             markFailed(fileId);
             throw e;
@@ -61,20 +67,31 @@ public class DocumentIngestionServiceImpl implements DocumentIngestionService {
     }
 
     /**
-     * 实际入库流程：状态流转 PARSING → VECTORING → SUCCESS。
+     * 实际入库流程：状态流转 PARSING → VECTORING → SUCCESS，阶段起始触发回调。
      */
-    private void doIngest(FileRecordVO record) {
+    private void doIngest(FileRecordVO record, ProgressCallback callback) {
         Long fileId = record.getFileId();
         fileService.updateStatus(fileId, FileStatus.PARSING);
+        notifyStage(callback, "PARSING");
         ParserDocument doc = parseDocument(record);
         // 由 IngestionService 注入 fileId，供 chunk 元数据按文件过滤
         doc.getMetadata().setFileId(fileId);
 
         fileService.updateStatus(fileId, FileStatus.VECTORING);
+        notifyStage(callback, "VECTORING");
         List<Document> chunks = documentChunker.chunk(doc);
         vectorStoreService.store(chunks);
         fileService.updateStatus(fileId, FileStatus.SUCCESS);
         log.info("文件入库完成 fileId={}, chunks={}", fileId, chunks.size());
+    }
+
+    /**
+     * 阶段起始回调，null 安全。
+     */
+    private void notifyStage(ProgressCallback callback, String stageCode) {
+        if (callback != null) {
+            callback.onStageStart(stageCode);
+        }
     }
 
     /**

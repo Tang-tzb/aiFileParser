@@ -104,6 +104,12 @@
             <artifactId>spring-ai-starter-vector-store-milvus</artifactId>
         </dependency>
 
+        <!-- ============ Redis：异步任务进度快照 + Pub/Sub 实时推送 ============ -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
         <!-- ============ 工具 ============ -->
         <dependency>
             <groupId>org.projectlombok</groupId>

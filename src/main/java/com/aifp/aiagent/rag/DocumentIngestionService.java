@@ -18,4 +18,15 @@ public interface DocumentIngestionService {
      * @param fileId 文件记录ID
      */
     void ingest(Long fileId);
+
+    /**
+     * 按 fileId 入库（带阶段回调）：在 PARSING/VECTORING 阶段起始时触发
+     * {@code callback.onStageStart(stageCode)}，供上层（异步任务）发布 0%/50% 进度。
+     * <p>
+     * 幂等：若文件状态已为 SUCCESS 则跳过，且不触发回调（已成功任务无进度可报）。
+     *
+     * @param fileId   文件记录ID
+     * @param callback 阶段回调，null 表示不回调（等价于 {@link #ingest(Long)}）
+     */
+    void ingest(Long fileId, ProgressCallback callback);
 }

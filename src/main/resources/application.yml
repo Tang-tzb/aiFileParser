@@ -69,6 +69,20 @@ spring:
         metric-type: COSINE
         initialize-schema: true
 
+  # ---------------- Redis：异步任务进度快照 + Pub/Sub ----------------
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: ${REDIS_DB:0}
+      timeout: 3000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+
 # ============================================================
 # RAG 切片与检索参数
 # ============================================================
@@ -83,6 +97,17 @@ rag:
     retry:
       # 抽取结果校验失败后的最大重试次数（含首次共 max-attempts+1 次 LLM 调用），默认 2
       max-attempts: ${RAG_EXTRACT_RETRY_MAX:2}
+
+# ============================================================
+# 异步任务 + SSE 进度推送参数
+# ============================================================
+task:
+  sse:
+    # SSE 连接超时（毫秒），默认 30 分钟，覆盖大文件解析全程
+    timeout-ms: ${TASK_SSE_TIMEOUT_MS:1800000}
+  progress:
+    # 进度快照在 Redis 的存活时长（小时），任务结束自动清理
+    snapshot-ttl-hours: ${TASK_PROGRESS_TTL_HOURS:3}
 
 # ============================================================
 # MyBatis-Plus 配置
