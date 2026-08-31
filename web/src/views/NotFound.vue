@@ -1,0 +1,24 @@
+<script lang="ts" setup>
+import {useRouter} from 'vue-router'
+
+const router = useRouter()
+</script>
+
+<template>
+  <div class="not-found">
+    <el-result icon="warning" sub-title="抱歉，您访问的页面不存在" title="404">
+      <template #extra>
+        <el-button type="primary" @click="router.push('/')">返回首页</el-button>
+      </template>
+    </el-result>
+  </div>
+</template>
+
+<style scoped>
+.not-found {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+</style>
