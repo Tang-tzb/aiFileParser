@@ -1,13 +1,14 @@
 package com.aifp.aiagent.controller;
 
 import com.aifp.aiagent.common.Result;
+import com.aifp.aiagent.dto.FileRecordVO;
 import com.aifp.aiagent.dto.FileUploadVO;
+import com.aifp.aiagent.dto.PageQuery;
+import com.aifp.aiagent.dto.PageResult;
 import com.aifp.aiagent.service.FileService;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 /**
@@ -30,5 +31,13 @@ public class FileController {
     @PostMapping("/upload")
     public Result<FileUploadVO> upload(@RequestParam("file") MultipartFile file) {
         return Result.success(fileService.upload(file));
+    }
+
+    /**
+     * 分页查询文件列表（按上传时间倒序）
+     */
+    @GetMapping("/page")
+    public Result<PageResult<FileRecordVO>> page(@Valid PageQuery query) {
+        return Result.success(fileService.page(query));
     }
 }

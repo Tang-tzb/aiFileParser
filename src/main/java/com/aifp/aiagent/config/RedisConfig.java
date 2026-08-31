@@ -33,9 +33,13 @@ public class RedisConfig {
     /**
      * 值序列化器：JSON + 默认类型信息，发布端写入 {@code @class}，
      * 订阅端可据此还原为 {@link com.aifp.aiagent.dto.TaskProgress} 等具体类型。
+     * <p>
+     * 声明为 {@code static}：Spring 直接通过类调用，无需先实例化 {@link RedisConfig}，
+     * 从而打破 RedisConfig ⇄ ProgressMessageListener ⇄ RedisSerializer 的循环依赖
+     * （ProgressMessageListener 构造注入此 bean，而 RedisConfig 又注入 ProgressMessageListener）。
      */
     @Bean
-    public RedisSerializer<Object> redisValueSerializer() {
+    public static RedisSerializer<Object> redisValueSerializer() {
         return new GenericJackson2JsonRedisSerializer();
     }
 

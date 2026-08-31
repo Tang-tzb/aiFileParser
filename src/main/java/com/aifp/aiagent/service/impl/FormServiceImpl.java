@@ -1,10 +1,7 @@
 package com.aifp.aiagent.service.impl;
 
 import com.aifp.aiagent.common.ResultCode;
-import com.aifp.aiagent.dto.FormCreateDTO;
-import com.aifp.aiagent.dto.FormFieldCreateDTO;
-import com.aifp.aiagent.dto.FormFieldVO;
-import com.aifp.aiagent.dto.FormVO;
+import com.aifp.aiagent.dto.*;
 import com.aifp.aiagent.entity.FormDefinition;
 import com.aifp.aiagent.entity.FormFieldDefinition;
 import com.aifp.aiagent.exception.BusinessException;
@@ -12,6 +9,7 @@ import com.aifp.aiagent.repository.FormDefinitionMapper;
 import com.aifp.aiagent.repository.FormFieldDefinitionMapper;
 import com.aifp.aiagent.service.FormService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -72,6 +70,21 @@ public class FormServiceImpl implements FormService {
     }
 
     @Override
+    public PageResult<FormVO> page(PageQuery query) {
+        // 分页查询表单元数据，按创建时间倒序
+        Page<FormDefinition> page = new Page<>(query.getPageNum(), query.getPageSize());
+        LambdaQueryWrapper<FormDefinition> wrapper = new LambdaQueryWrapper<FormDefinition>()
+                .orderByDesc(FormDefinition::getCreateTime);
+        Page<FormDefinition> result = formDefinitionMapper.selectPage(page, wrapper);
+        // 列表场景不查字段，避免 N+1；字段详情走 getFormById
+        List<FormVO> records = result.getRecords().stream()
+                .map(form -> toFormVO(form, Collections.emptyList()))
+                .toList();
+        return PageResult.of(result.getTotal(), result.getPages(),
+                result.getCurrent(), result.getSize(), records);
+    }
+
+    @Override
     @Transactional(rollbackFor = Exception.class)
     public Long addField(Long formId, FormFieldCreateDTO dto) {
         ensureFormExists(formId);
@@ -92,6 +105,20 @@ public class FormServiceImpl implements FormService {
         }
         formFieldDefinitionMapper.deleteById(fieldId);
         log.info("删除表单字段成功 formId={}, fieldId={}", formId, fieldId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void deleteForm(Long id) {
+        // 表单须存在，不存在抛 FORM_NOT_FOUND
+        ensureFormExists(id);
+        // 级联软删除表单下所有字段（@TableLogic 自动生效为逻辑删除）
+        formFieldDefinitionMapper.delete(
+                new LambdaQueryWrapper<FormFieldDefinition>()
+                        .eq(FormFieldDefinition::getFormId, id));
+        // 软删除表单元数据
+        formDefinitionMapper.deleteById(id);
+        log.info("删除表单成功 formId={}", id);
     }
 
     // ==================== 内部方法 ====================

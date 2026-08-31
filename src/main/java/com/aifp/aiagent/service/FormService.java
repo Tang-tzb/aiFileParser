@@ -1,8 +1,6 @@
 package com.aifp.aiagent.service;
 
-import com.aifp.aiagent.dto.FormCreateDTO;
-import com.aifp.aiagent.dto.FormFieldCreateDTO;
-import com.aifp.aiagent.dto.FormVO;
+import com.aifp.aiagent.dto.*;
 
 /**
  * 动态表单管理服务
@@ -28,6 +26,17 @@ public interface FormService {
     FormVO getFormById(Long id);
 
     /**
+     * 分页查询表单列表（按 createTime DESC）。
+     * <p>
+     * 列表场景仅返回表单元数据，{@code fields} 置空避免 N+1 查询；
+     * 字段详情请走 {@link #getFormById(Long)}。
+     *
+     * @param query 分页参数
+     * @return 分页结果（每条为 FormVO，fields 为空列表）
+     */
+    PageResult<FormVO> page(PageQuery query);
+
+    /**
      * 向已有表单追加一个字段。
      *
      * @param formId 表单ID
@@ -43,4 +52,11 @@ public interface FormService {
      * @param fieldId 字段ID
      */
     void deleteField(Long formId, Long fieldId);
+
+    /**
+     * 删除表单（软删除表单元数据 + 级联软删除其下所有字段）。
+     *
+     * @param id 表单ID
+     */
+    void deleteForm(Long id);
 }

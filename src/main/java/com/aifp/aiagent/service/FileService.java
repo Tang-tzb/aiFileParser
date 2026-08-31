@@ -2,6 +2,8 @@ package com.aifp.aiagent.service;
 
 import com.aifp.aiagent.dto.FileRecordVO;
 import com.aifp.aiagent.dto.FileUploadVO;
+import com.aifp.aiagent.dto.PageQuery;
+import com.aifp.aiagent.dto.PageResult;
 import com.aifp.aiagent.entity.enums.FileStatus;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -38,4 +40,12 @@ public interface FileService {
      * @return 文件记录 VO
      */
     FileRecordVO getById(Long id);
+
+    /**
+     * 分页查询文件记录（按 createTime DESC）。
+     *
+     * @param query 分页参数
+     * @return 分页结果（每条为 FileRecordVO，含全部字段）
+     */
+    PageResult<FileRecordVO> page(PageQuery query);
 }

@@ -1,7 +1,10 @@
 package com.aifp.aiagent.controller;
 
 import com.aifp.aiagent.common.ResultCode;
+import com.aifp.aiagent.dto.FileRecordVO;
 import com.aifp.aiagent.dto.FileUploadVO;
+import com.aifp.aiagent.dto.PageQuery;
+import com.aifp.aiagent.dto.PageResult;
 import com.aifp.aiagent.entity.enums.FileStatus;
 import com.aifp.aiagent.entity.enums.FileType;
 import com.aifp.aiagent.exception.BusinessException;
@@ -23,10 +26,11 @@ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart;
 import static org.springframework.test.web.servlet.result.MockMvcResultHandlers.print;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -81,7 +85,7 @@ class FileControllerTest {
                 .andDo(print())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(200))
-                .andExpect(jsonPath("$.data.fileId").value(FILE_ID.intValue()))
+                .andExpect(jsonPath("$.data.fileId").value(String.valueOf(FILE_ID)))
                 .andExpect(jsonPath("$.data.fileName").value("项目申报书.pdf"))
                 .andExpect(jsonPath("$.data.fileType").value("PDF"))
                 .andExpect(jsonPath("$.data.status").value("UPLOADED"));
@@ -179,6 +183,72 @@ class FileControllerTest {
         vo.setFileName(fileName);
         vo.setFileType(type);
         vo.setFilePath("2026/07/abc123." + type.name().toLowerCase());
+        vo.setStatus(FileStatus.UPLOADED);
+        vo.setCreateTime(LocalDateTime.now());
+        return vo;
+    }
+
+    // ==================== 分页查询 /file/page ====================
+
+    /**
+     * 分页查询正常 → 200，返回 records 含 2 条
+     */
+    @Test
+    void page_normal_shouldReturnRecords() throws Exception {
+        PageResult<FileRecordVO> pr = PageResult.of(
+                2L, 1L, 1L, 10L,
+                List.of(buildRecordVO(1L, "a.pdf"), buildRecordVO(2L, "b.xlsx")));
+
+        when(fileService.page(any(PageQuery.class))).thenReturn(pr);
+
+        mockMvc.perform(get("/file/page")
+                        .param("pageNum", "1")
+                        .param("pageSize", "10"))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.total").value(2))
+                .andExpect(jsonPath("$.data.records[0].fileName").value("a.pdf"))
+                .andExpect(jsonPath("$.data.records[1].fileName").value("b.xlsx"));
+
+        verify(fileService).page(any(PageQuery.class));
+    }
+
+    /**
+     * pageSize 超过 100 → 参数校验失败 → 40001
+     */
+    @Test
+    void page_invalidPageSize_shouldReturn40001() throws Exception {
+        mockMvc.perform(get("/file/page")
+                        .param("pageSize", "200"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(40001));
+
+        verify(fileService, never()).page(any(PageQuery.class));
+    }
+
+    /**
+     * 空结果 → total=0, records=[]
+     */
+    @Test
+    void page_empty_shouldReturnEmptyList() throws Exception {
+        when(fileService.page(any(PageQuery.class))).thenReturn(PageResult.empty());
+
+        mockMvc.perform(get("/file/page"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.total").value(0))
+                .andExpect(jsonPath("$.data.records").isEmpty());
+
+        verify(fileService).page(any(PageQuery.class));
+    }
+
+    private FileRecordVO buildRecordVO(Long id, String fileName) {
+        FileRecordVO vo = new FileRecordVO();
+        vo.setFileId(id);
+        vo.setFileName(fileName);
+        vo.setFileType(FileType.PDF);
+        vo.setFilePath("2026/08/" + id + ".pdf");
         vo.setStatus(FileStatus.UPLOADED);
         vo.setCreateTime(LocalDateTime.now());
         return vo;

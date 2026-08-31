@@ -1,5 +1,7 @@
 package com.aifp.aiagent.dto;
 
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import lombok.Data;
 
 import java.io.Serial;
@@ -18,6 +20,10 @@ public class FormVO implements Serializable {
     @Serial
     private static final long serialVersionUID = 1L;
 
+    /**
+     * 表单 ID（雪花算法大整数，序列化为字符串避免前端 JS 精度丢失）
+     */
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long formId;
     private String formName;
     private String description;

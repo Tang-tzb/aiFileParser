@@ -1,10 +1,7 @@
 package com.aifp.aiagent.controller;
 
 import com.aifp.aiagent.common.ResultCode;
-import com.aifp.aiagent.dto.FormCreateDTO;
-import com.aifp.aiagent.dto.FormFieldCreateDTO;
-import com.aifp.aiagent.dto.FormFieldVO;
-import com.aifp.aiagent.dto.FormVO;
+import com.aifp.aiagent.dto.*;
 import com.aifp.aiagent.entity.enums.FieldType;
 import com.aifp.aiagent.exception.BusinessException;
 import com.aifp.aiagent.exception.GlobalExceptionHandler;
@@ -23,6 +20,7 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
 import java.util.List;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -137,7 +135,7 @@ class FormControllerTest {
                 .andDo(print())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(200))
-                .andExpect(jsonPath("$.data.formId").value(FORM_ID.intValue()))
+                .andExpect(jsonPath("$.data.formId").value(String.valueOf(FORM_ID)))
                 .andExpect(jsonPath("$.data.formName").value("项目申报表"))
                 .andExpect(jsonPath("$.data.fields[0].fieldCode").value("projectName"));
 
@@ -156,6 +154,63 @@ class FormControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(5001))
                 .andExpect(jsonPath("$.message").value("表单不存在"));
+    }
+
+    // ==================== GET /form/page ====================
+
+    /**
+     * 分页查询正常 → 200，返回 records 含 2 条（列表场景 fields 为空）
+     */
+    @Test
+    void page_normal_shouldReturnRecords() throws Exception {
+        PageResult<FormVO> pr = PageResult.of(
+                2L, 1L, 1L, 10L,
+                List.of(listFormVO(1L, "申报表A"), listFormVO(2L, "申报表B")));
+
+        when(formService.page(any(PageQuery.class))).thenReturn(pr);
+
+        mockMvc.perform(get("/form/page")
+                        .param("pageNum", "1")
+                        .param("pageSize", "10"))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.total").value(2))
+                .andExpect(jsonPath("$.data.records[0].formName").value("申报表A"))
+                .andExpect(jsonPath("$.data.records[1].formName").value("申报表B"))
+                // 列表场景 fields 为空，前端走详情接口获取字段
+                .andExpect(jsonPath("$.data.records[0].fields").isEmpty());
+
+        verify(formService).page(any(PageQuery.class));
+    }
+
+    /**
+     * pageSize 超过 100 → 参数校验失败 → 40001
+     */
+    @Test
+    void page_invalidPageSize_shouldReturn40001() throws Exception {
+        mockMvc.perform(get("/form/page")
+                        .param("pageSize", "200"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(40001));
+
+        verifyNoInteractions(formService);
+    }
+
+    /**
+     * 空结果 → total=0, records=[]
+     */
+    @Test
+    void page_empty_shouldReturnEmptyList() throws Exception {
+        when(formService.page(any(PageQuery.class))).thenReturn(PageResult.empty());
+
+        mockMvc.perform(get("/form/page"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.total").value(0))
+                .andExpect(jsonPath("$.data.records").isEmpty());
+
+        verify(formService).page(any(PageQuery.class));
     }
 
     // ==================== POST /form/{id}/field ====================
@@ -244,6 +299,36 @@ class FormControllerTest {
                 .andExpect(jsonPath("$.message").value("字段不存在"));
     }
 
+    // ==================== DELETE /form/{id} ====================
+
+    /**
+     * 正常软删表单（级联软删字段）→ 200，service 被调用
+     */
+    @Test
+    void deleteForm_shouldReturn200() throws Exception {
+        mockMvc.perform(delete("/form/{id}", FORM_ID))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data").doesNotExist());
+
+        verify(formService).deleteForm(FORM_ID);
+    }
+
+    /**
+     * service 抛 FORM_NOT_FOUND → 5001
+     */
+    @Test
+    void deleteForm_shouldReturn5001WhenNotFound() throws Exception {
+        doThrow(new BusinessException(ResultCode.FORM_NOT_FOUND))
+                .when(formService).deleteForm(9999L);
+
+        mockMvc.perform(delete("/form/{id}", 9999L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(5001))
+                .andExpect(jsonPath("$.message").value("表单不存在"));
+    }
+
     // ==================== 测试数据构造 ====================
 
     private FormCreateDTO validCreateDTO() {
@@ -305,5 +390,19 @@ class FormControllerTest {
         dto.setRequired(false);
         dto.setSort(5);
         return dto;
+    }
+
+    /**
+     * 列表场景 FormVO：仅表单元数据，fields 为空
+     */
+    private FormVO listFormVO(Long id, String formName) {
+        FormVO vo = new FormVO();
+        vo.setFormId(id);
+        vo.setFormName(formName);
+        vo.setDescription("desc");
+        vo.setCreateTime(LocalDateTime.now());
+        vo.setUpdateTime(LocalDateTime.now());
+        vo.setFields(Collections.emptyList());
+        return vo;
     }
 }
