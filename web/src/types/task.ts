@@ -10,6 +10,17 @@ export enum TaskStatus {
 }
 
 /**
+ * 任务状态中文标签映射
+ */
+export const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
+    [TaskStatus.PARSING]: '解析中',
+    [TaskStatus.VECTORING]: '向量化中',
+    [TaskStatus.EXTRACTING]: 'AI抽取中',
+    [TaskStatus.SUCCESS]: '完成',
+    [TaskStatus.FAILED]: '处理失败'
+}
+
+/**
  * 任务进度百分比常量
  */
 export const TASK_PERCENT = {
@@ -41,29 +52,32 @@ export interface ExtractionResult {
 
 /**
  * 任务启动请求
+ * - fileId/formId 用 number | string 兼容字符串 ID（避免大整数精度丢失）
  */
 export interface TaskStartRequest {
-    formId: number
-    fileId: number
+    formId: number | string
+    fileId: number | string
 }
 
 /**
  * 任务启动响应
+ * - fileId/formId 用 number | string 兼容后端字符串输出
  */
 export interface TaskStartVO {
     taskId: string
-    fileId: number
-    formId: number
+    fileId: number | string
+    formId: number | string
     createTime: string
 }
 
 /**
  * SSE 推送的任务进度
+ * - fileId/formId 用 number | string 兼容后端字符串输出
  */
 export interface TaskProgress {
     taskId: string
-    fileId: number
-    formId: number
+    fileId: number | string
+    formId: number | string
     status: TaskStatus
     percent: number
     message: string

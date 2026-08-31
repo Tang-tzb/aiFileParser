@@ -1,5 +1,7 @@
 package com.aifp.aiagent.dto;
 
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 
@@ -27,13 +29,15 @@ public class TaskStartVO implements Serializable {
     private String taskId;
 
     /**
-     * 关联文件 ID
+     * 关联文件 ID（雪花算法大整数，序列化为字符串避免前端 JS 精度丢失）
      */
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long fileId;
 
     /**
-     * 关联表单 ID
+     * 关联表单 ID（雪花算法大整数，序列化为字符串避免前端 JS 精度丢失）
      */
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long formId;
 
     /**

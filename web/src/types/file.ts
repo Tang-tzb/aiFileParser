@@ -62,3 +62,16 @@ export interface FileUploadVO {
     status: FileStatus
     createTime: string
 }
+
+/**
+ * 文件记录展示 VO（GET /file/page 返回，供 AI 填报页文件下拉用）
+ */
+export interface FileRecordVO {
+    fileId: number | string
+    fileName: string
+    fileType: FileType
+    filePath: string
+    status: FileStatus
+    createTime: string
+    updateTime?: string
+}

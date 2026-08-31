@@ -1,5 +1,9 @@
 package com.aifp.aiagent.dto;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.annotation.JsonSerialize;
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
 import lombok.Data;
 
 import java.io.Serial;
@@ -20,6 +24,7 @@ import java.io.Serializable;
  * @author Tang_tzb
  */
 @Data
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class TaskProgress implements Serializable {
 
     @Serial
@@ -31,13 +36,15 @@ public class TaskProgress implements Serializable {
     private String taskId;
 
     /**
-     * 关联文件 ID
+     * 关联文件 ID（雪花算法大整数，序列化为字符串避免前端 JS 精度丢失）
      */
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long fileId;
 
     /**
-     * 关联表单 ID
+     * 关联表单 ID（雪花算法大整数，序列化为字符串避免前端 JS 精度丢失）
      */
+    @JsonSerialize(using = ToStringSerializer.class)
     private Long formId;
 
     /**
@@ -91,7 +98,11 @@ public class TaskProgress implements Serializable {
 
     /**
      * 是否终态（完成或失败）。
+     * <p>
+     * 派生计算属性，{@link JsonIgnore} 阻止其被 Jackson 当作 {@code terminal} 属性序列化，
+     * 否则订阅端反序列化会因 {@code TaskProgress} 无该字段而抛 Unrecognized field。
      */
+    @JsonIgnore
     public boolean isTerminal() {
         return percent == 100 || "FAILED".equals(status);
     }

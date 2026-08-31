@@ -78,8 +78,8 @@ class TaskControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(200))
                 .andExpect(jsonPath("$.data.taskId").value("task-1"))
-                .andExpect(jsonPath("$.data.formId").value(FORM_ID.intValue()))
-                .andExpect(jsonPath("$.data.fileId").value(FILE_ID.intValue()));
+                .andExpect(jsonPath("$.data.formId").value(String.valueOf(FORM_ID)))
+                .andExpect(jsonPath("$.data.fileId").value(String.valueOf(FILE_ID)));
 
         verify(parseTaskService).start(FORM_ID, FILE_ID);
     }

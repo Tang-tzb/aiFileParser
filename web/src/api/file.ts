@@ -1,5 +1,6 @@
-import {post} from './http'
-import type {FileUploadVO} from '@/types/file'
+import {get, post} from './http'
+import type {PageResult} from '@/types/api'
+import type {FileRecordVO, FileUploadVO} from '@/types/file'
 
 /**
  * 文件模块 API
@@ -26,4 +27,12 @@ export function uploadFile(file: File, onProgress?: (percent: number) => void) {
             }
         }
     })
+}
+
+/**
+ * 分页查询文件列表（按上传时间倒序）
+ * - AI 填报页文件下拉选择用
+ */
+export function getFileList(params: { pageNum?: number; pageSize?: number }) {
+    return get<PageResult<FileRecordVO>>('/file/page', params as Record<string, unknown>)
 }
