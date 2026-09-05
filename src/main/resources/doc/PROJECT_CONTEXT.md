@@ -390,6 +390,7 @@ src/main/java/com/aifp/aiagent/
 - **依赖**：`FileService`
 - **接口**：
     - `POST /file/upload` —— `Result<FileUploadVO> upload(@RequestParam("file") MultipartFile file)`
+  - `GET /file/page` —— `Result<PageResult<FileRecordVO>> page(@Valid PageQuery query)`（按上传时间倒序）
 
 #### FillController（前缀 `/fill`）
 
@@ -913,6 +914,12 @@ src/main/java/com/aifp/aiagent/
 - 所有 Controller 返回 `Result<T>`，字段 code/message/data/timestamp。
 - 静态工厂构造；`isSuccess()` 判 code=200。
 - 新增模块错误码需在 `ResultCode` 追加对应段（2xxx 文件 / 3xxx AI / 4xxx 向量 / 5xxx 表单）。
+
+### Long 型 ID 序列化（强约定）
+
+- 雪花 ID 超出 JS `Number.MAX_SAFE_INTEGER`，所有 VO/DTO 中 Long 型 ID（formId/fileId/fieldId）必须标注
+  `@JsonSerialize(using = ToStringSerializer.class)` 以字符串传输（TaskProgress/FormVO/FileRecordVO/FormFieldVO/FileUploadVO
+  等均已处理）。
 
 ### 异常处理
 

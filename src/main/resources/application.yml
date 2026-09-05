@@ -160,3 +160,17 @@ management:
 file:
   # 上传文件根目录（相对路径基于应用工作目录；生产建议设为绝对路径）
   upload-dir: ${FILE_UPLOAD_DIR:./uploads}
+
+# ============================================================
+# PDF 内容检测参数（阶段1：parser/pdf 检测层）
+# ============================================================
+document:
+  parser:
+    pdf:
+      detector:
+        # 整页图片判定阈值：单图有效占位比 >= 该值视为整页图（IMAGE_ONLY 依据）
+        full-image-ratio: ${PDF_DETECTOR_FULL_IMAGE_RATIO:0.85}
+        # 大图判定阈值：单图有效占位比 >= 该值视为大图（文字+大图 → MIXED；Logo/印章小图不影响）
+        large-image-ratio: ${PDF_DETECTOR_LARGE_IMAGE_RATIO:0.20}
+        # 有效文字最小字符数：非空白字符数低于该值视为无有效文字层
+        text-min-count: ${PDF_DETECTOR_TEXT_MIN_COUNT:5}
