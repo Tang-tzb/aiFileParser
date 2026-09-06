@@ -54,15 +54,39 @@ final class PdfPageTestSupport {
      * （路由验收只验证解析器名与类型，不依赖真实引擎）。
      */
     static ImagePageParser buildImagePageParser() {
-        com.aifp.aiagent.parser.ocr.OcrParser emptyOcr = request ->
-                com.aifp.aiagent.parser.ocr.OcrResult.builder()
-                        .status(com.aifp.aiagent.parser.ocr.OcrStatus.EMPTY)
-                        .pages(java.util.List.of())
-                        .build();
         return new ImagePageParser(
                 new com.aifp.aiagent.parser.pdf.PageImageRenderer(),
-                emptyOcr,
+                emptyOcrParser(),
                 new com.aifp.aiagent.parser.pdf.text.SimpleCoordinateTransformer());
+    }
+
+    /**
+     * 恒返回 EMPTY 的 OCR 桩（路由冒烟测试用，不依赖真实引擎）。
+     */
+    static com.aifp.aiagent.parser.ocr.OcrParser emptyOcrParser() {
+        return request -> com.aifp.aiagent.parser.ocr.OcrResult.builder()
+                .status(com.aifp.aiagent.parser.ocr.OcrStatus.EMPTY)
+                .pages(java.util.List.of())
+                .build();
+    }
+
+    /**
+     * 构建接入真实区域融合链路的混合页解析器（阶段 6），
+     * OCR 使用传入桩以便测试捕获请求/构造词级结果。
+     */
+    static MixedPageParser buildMixedPageParser(com.aifp.aiagent.parser.ocr.OcrParser ocrParser) {
+        com.aifp.aiagent.parser.pdf.text.SimpleCoordinateTransformer transformer =
+                new com.aifp.aiagent.parser.pdf.text.SimpleCoordinateTransformer();
+        com.aifp.aiagent.parser.pdf.region.CoordinateMatcher matcher =
+                new com.aifp.aiagent.parser.pdf.region.CoordinateMatcher(transformer);
+        return new MixedPageParser(
+                new com.aifp.aiagent.parser.pdf.text.DefaultPdfTextExtractor(
+                        new com.aifp.aiagent.parser.pdf.text.PdfCoordinateConverter()),
+                new com.aifp.aiagent.parser.pdf.PageImageRenderer(),
+                ocrParser,
+                new com.aifp.aiagent.parser.pdf.region.DefaultRegionAnalyzer(matcher),
+                new com.aifp.aiagent.parser.pdf.region.OcrEligibilityEvaluator(),
+                matcher);
     }
 
     /**
@@ -73,7 +97,7 @@ final class PdfPageTestSupport {
         return new PageParserRouter(java.util.List.of(
                 textPageParser,
                 buildImagePageParser(),
-                new MixedPageParser(textPageParser),
+                buildMixedPageParser(emptyOcrParser()),
                 new EmptyPageParser()));
     }
 

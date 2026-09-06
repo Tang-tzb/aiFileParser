@@ -199,3 +199,17 @@ document:
         timeout-seconds: ${OCR_TIMEOUT_SECONDS:300}
         # 识别并发（资源限制：2CPU/8GB → 固定 1）
         concurrency: ${OCR_CONCURRENCY:1}
+      # 视觉区域参数（阶段6：parser/pdf/region 混合融合层）
+      region:
+        # UNKNOWN 判定的文字覆盖率上限输入（coverage 低于该值视为"缺文字"）
+        text-coverage-skip-ratio: ${PDF_REGION_TEXT_COVERAGE_SKIP_RATIO:0.50}
+        # IMAGE/UNKNOWN 视觉文本候选阈值（textCandidateScore ≥ 该值才可能 OCR）
+        image-text-candidate-ratio: ${PDF_REGION_IMAGE_TEXT_CANDIDATE_RATIO:0.60}
+        # STAMP 判定：区域红色像素占比阈值
+        stamp-red-ratio: ${PDF_REGION_STAMP_RED_RATIO:0.10}
+        # OCR 词去重阈值：词面积被 PDF 原生文字覆盖的比例（非 IoU）
+        word-dedup-ratio: ${PDF_REGION_WORD_DEDUP_RATIO:0.80}
+        # 空间合法性容差（pt）：区域 bbox 外扩该值后需与 OCR 元素存在有效交集
+        spatial-tolerance-pt: ${PDF_REGION_SPATIAL_TOLERANCE_PT:2.0}
+        # 整页图豁免阈值：区域占页面积比 ≥ 该值 → 恒不区域 OCR（禁变相整页 OCR）
+        full-page-forbidden-ratio: ${PDF_REGION_FULL_PAGE_FORBIDDEN_RATIO:0.85}

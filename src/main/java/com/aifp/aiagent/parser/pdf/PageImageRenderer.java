@@ -52,12 +52,12 @@ public class PageImageRenderer {
         ImageIO.write(image, "png", tempFile);
         log.debug("页面渲染完成 pageIndex={}, dpi={}, size={}x{}, file={}",
                 pageIndex, renderDpi, image.getWidth(), image.getHeight(), tempFile.getName());
-        return new RenderedPage(tempFile, image.getWidth(), image.getHeight(), renderDpi);
+        return new RenderedPage(tempFile, image.getWidth(), image.getHeight(), renderDpi, image);
     }
 
     /**
-     * 渲染产物元数据：临时文件 + 图像尺寸 + DPI（供 OcrRequest 填充，
-     * 识别层无需二次解码图片）。
+     * 渲染产物元数据：临时文件 + 图像尺寸 + DPI + 渲染图本体（供 OCR 请求填充
+     * 与阶段 6 区域分析/裁剪复用，识别层无需二次解码图片）。
      */
     @Data
     @AllArgsConstructor
@@ -66,5 +66,10 @@ public class PageImageRenderer {
         private final int width;
         private final int height;
         private final int dpi;
+
+        /**
+         * 当页渲染图（单页一次渲染，全页仅此一份；调用方用后随对象释放）
+         */
+        private final java.awt.image.BufferedImage image;
     }
 }
