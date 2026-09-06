@@ -1,16 +1,17 @@
 package com.aifp.aiagent.parser.pdf.page;
 
+import com.aifp.aiagent.parser.pdf.text.BoundingBox;
 import lombok.Builder;
 import lombok.Data;
 
 /**
  * 页面元素：页内最小内容单元的轻量占位模型。
  * <p>
- * 仅包含来源标识与文本载荷，不含坐标/字体/表格结构（分别由阶段 3 TextBlock、
- * 阶段 5/6 Region/表格识别、阶段 9 Document AST 扩展）。字段约定：
+ * 阶段 3 起携带结构化文字信息（bbox/字号/字体）；表格结构、AST 级元素体系
+ * 分别由阶段 5/6 与阶段 9 扩展。字段约定：
  * <ul>
- *   <li>TEXT 元素：text 必填，description 忽略；</li>
- *   <li>PENDING_OCR 元素：text 恒为空串，description 必填（写明待处理内容与接入阶段）。</li>
+ *   <li>TEXT 元素：text 必填，bbox/fontSize/fontName 必填（来自 TextBlock）；</li>
+ *   <li>PENDING_OCR 元素：text 恒为空串，description 必填，bbox/fontSize/fontName 为 null。</li>
  * </ul>
  *
  * @author Tang_tzb
@@ -38,4 +39,19 @@ public class PageElement {
      * 说明信息（仅 PENDING_OCR 使用）
      */
     private String description;
+
+    /**
+     * 外接矩形（PDF 用户空间，来自 TextBlock；PENDING_OCR 为 null）
+     */
+    private BoundingBox bbox;
+
+    /**
+     * 主字号 pt（来自 TextBlock；PENDING_OCR 为 null）
+     */
+    private Float fontSize;
+
+    /**
+     * 主字体名（来自 TextBlock；PENDING_OCR 为 null）
+     */
+    private String fontName;
 }

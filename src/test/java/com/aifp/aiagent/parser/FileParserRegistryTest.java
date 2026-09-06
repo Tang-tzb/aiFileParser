@@ -17,7 +17,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class FileParserRegistryTest {
 
     private final FileParserRegistry registry =
-            new FileParserRegistry(List.of(new PdfParser(), new ExcelParser(), new WordParser()));
+            new FileParserRegistry(List.of(
+                    new PdfParser(new com.aifp.aiagent.parser.pdf.text.DefaultPdfTextExtractor(
+                            new com.aifp.aiagent.parser.pdf.text.PdfCoordinateConverter())),
+                    new ExcelParser(), new WordParser()));
 
     @Test
     void getPdf_returnsPdfParser() {

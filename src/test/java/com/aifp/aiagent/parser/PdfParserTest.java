@@ -26,7 +26,9 @@ class PdfParserTest {
 
     private static final String EXPECTED_TEXT = "Hello PDFBox Test Project";
 
-    private final PdfParser parser = new PdfParser();
+    private final PdfParser parser = new PdfParser(
+            new com.aifp.aiagent.parser.pdf.text.DefaultPdfTextExtractor(
+                    new com.aifp.aiagent.parser.pdf.text.PdfCoordinateConverter()));
 
     @Test
     void parse_extractsTextAndMetadata(@TempDir Path tempDir) throws Exception {

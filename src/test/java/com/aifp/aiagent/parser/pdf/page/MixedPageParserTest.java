@@ -27,7 +27,7 @@ class MixedPageParserTest {
         File pdf = tempDir.resolve("mixed-page.pdf").toFile();
         PdfPageTestSupport.buildMixedPagePdf(pdf);
 
-        MixedPageParser parser = new MixedPageParser(new TextPageParser());
+        MixedPageParser parser = new MixedPageParser(PdfPageTestSupport.buildTextPageParser());
         try (PDDocument doc = Loader.loadPDF(pdf)) {
             PageDocument result = parser.parse(context(doc));
 

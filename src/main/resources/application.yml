@@ -174,3 +174,11 @@ document:
         large-image-ratio: ${PDF_DETECTOR_LARGE_IMAGE_RATIO:0.20}
         # 有效文字最小字符数：非空白字符数低于该值视为无有效文字层
         text-min-count: ${PDF_DETECTOR_TEXT_MIN_COUNT:5}
+      # 文字结构化参数（阶段3：parser/pdf/text 提取层）
+      text:
+        # Y 聚合成行的容差系数（×行内最大字高）
+        line-tolerance-ratio: ${PDF_TEXT_LINE_TOLERANCE_RATIO:0.50}
+        # 行内插空格的间隙系数（×字号；Helvetica 空格步进 0.278em，需小于该值方可还原空格）
+        space-gap-ratio: ${PDF_TEXT_SPACE_GAP_RATIO:0.25}
+        # 行间距超过该系数×前行字号则分块
+        block-gap-ratio: ${PDF_TEXT_BLOCK_GAP_RATIO:1.20}

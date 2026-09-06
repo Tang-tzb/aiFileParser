@@ -42,10 +42,18 @@ final class PdfPageTestSupport {
     }
 
     /**
+     * 构建接入结构化文字提取器的纯文字页解析器（阈值使用声明处默认值）。
+     */
+    static TextPageParser buildTextPageParser() {
+        return new TextPageParser(new com.aifp.aiagent.parser.pdf.text.DefaultPdfTextExtractor(
+                new com.aifp.aiagent.parser.pdf.text.PdfCoordinateConverter()));
+    }
+
+    /**
      * 构建注册全部内置解析器的路由器。
      */
     static PageParserRouter buildRouter() {
-        TextPageParser textPageParser = new TextPageParser();
+        TextPageParser textPageParser = buildTextPageParser();
         return new PageParserRouter(java.util.List.of(
                 textPageParser,
                 new ImagePageParser(),

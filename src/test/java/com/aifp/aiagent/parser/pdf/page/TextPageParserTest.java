@@ -27,7 +27,7 @@ class TextPageParserTest {
         File pdf = tempDir.resolve("text-page.pdf").toFile();
         PdfPageTestSupport.buildTextPagePdf(pdf);
 
-        TextPageParser parser = new TextPageParser();
+        TextPageParser parser = PdfPageTestSupport.buildTextPageParser();
         try (PDDocument doc = Loader.loadPDF(pdf)) {
             PageDocument result = parser.parse(context(doc));
 
@@ -42,6 +42,12 @@ class TextPageParserTest {
             assertThat(element.getType()).isEqualTo(PageElementType.TEXT);
             assertThat(element.getSource()).isEqualTo(ElementSource.PDF_TEXT);
             assertThat(element.getText()).contains("Hello PDFBox page parser fixture");
+            // 阶段 3 结构化字段：TextBlock → BoundingBox 链
+            assertThat(element.getBbox()).isNotNull();
+            assertThat(element.getBbox().getX()).isGreaterThan(0);
+            assertThat(element.getBbox().top()).isLessThan(PdfPageTestSupport.PAGE_H + 1);
+            assertThat(element.getFontSize()).isNotNull().isGreaterThan(0);
+            assertThat(element.getFontName()).isNotBlank();
         }
     }
 
