@@ -64,4 +64,72 @@ public class BoundingBox {
                 .height(maxY - minY)
                 .build();
     }
+
+    /**
+     * 是否完全包含另一矩形（边界相接算包含）。
+     */
+    public boolean contains(BoundingBox other) {
+        return x <= other.x && y <= other.y
+                && right() >= other.right() && top() >= other.top();
+    }
+
+    /**
+     * 是否包含点（左/下闭区间，右/上开区间）。
+     */
+    public boolean contains(float px, float py) {
+        return x <= px && px < right() && y <= py && py < top();
+    }
+
+    /**
+     * 是否与另一矩形重叠（交集面积 > 0；边缘相接不算重叠）。
+     */
+    public boolean overlap(BoundingBox other) {
+        return Math.min(right(), other.right()) > Math.max(x, other.x)
+                && Math.min(top(), other.top()) > Math.max(y, other.y);
+    }
+
+    /**
+     * 与另一矩形的交集矩形；无重叠（含边缘相接）返回 null。
+     */
+    public BoundingBox intersection(BoundingBox other) {
+        float ix = Math.max(x, other.x);
+        float iy = Math.max(y, other.y);
+        float ir = Math.min(right(), other.right());
+        float it = Math.min(top(), other.top());
+        if (ir <= ix || it <= iy) {
+            return null;
+        }
+        return BoundingBox.builder()
+                .x(ix)
+                .y(iy)
+                .width(ir - ix)
+                .height(it - iy)
+                .build();
+    }
+
+    /**
+     * 与另一矩形的交并比 IoU ∈ [0,1]；任一矩形零面积时为 0。
+     */
+    public double iou(BoundingBox other) {
+        BoundingBox inter = intersection(other);
+        if (inter == null) {
+            return 0d;
+        }
+        double interArea = (double) inter.width * inter.height;
+        double unionArea = (double) width * height
+                + (double) other.width * other.height - interArea;
+        return unionArea <= 0 ? 0d : interArea / unionArea;
+    }
+
+    /**
+     * 四周外扩 margin（负值内缩；纯数学运算，不裁剪退化矩形，调用方自理）。
+     */
+    public BoundingBox expand(float margin) {
+        return BoundingBox.builder()
+                .x(x - margin)
+                .y(y - margin)
+                .width(width + 2 * margin)
+                .height(height + 2 * margin)
+                .build();
+    }
 }
