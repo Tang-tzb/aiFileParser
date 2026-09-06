@@ -50,13 +50,29 @@ final class PdfPageTestSupport {
     }
 
     /**
+     * 构建整页图片页解析器：离线路由测试用，OCR 使用恒返回 EMPTY 的桩
+     * （路由验收只验证解析器名与类型，不依赖真实引擎）。
+     */
+    static ImagePageParser buildImagePageParser() {
+        com.aifp.aiagent.parser.ocr.OcrParser emptyOcr = request ->
+                com.aifp.aiagent.parser.ocr.OcrResult.builder()
+                        .status(com.aifp.aiagent.parser.ocr.OcrStatus.EMPTY)
+                        .pages(java.util.List.of())
+                        .build();
+        return new ImagePageParser(
+                new com.aifp.aiagent.parser.pdf.PageImageRenderer(),
+                emptyOcr,
+                new com.aifp.aiagent.parser.pdf.text.SimpleCoordinateTransformer());
+    }
+
+    /**
      * 构建注册全部内置解析器的路由器。
      */
     static PageParserRouter buildRouter() {
         TextPageParser textPageParser = buildTextPageParser();
         return new PageParserRouter(java.util.List.of(
                 textPageParser,
-                new ImagePageParser(),
+                buildImagePageParser(),
                 new MixedPageParser(textPageParser),
                 new EmptyPageParser()));
     }
@@ -67,6 +83,16 @@ final class PdfPageTestSupport {
     static void buildTextPagePdf(File pdf) throws IOException {
         try (PDDocument doc = new PDDocument()) {
             appendTextPage(doc);
+            doc.save(pdf);
+        }
+    }
+
+    /**
+     * 生成 1 页整页图片 PDF（IMAGE_ONLY 模拟扫描件，供 OCR 流程测试）。
+     */
+    static void buildImagePagePdf(File pdf) throws IOException {
+        try (PDDocument doc = new PDDocument()) {
+            appendImagePage(doc);
             doc.save(pdf);
         }
     }

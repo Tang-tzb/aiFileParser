@@ -37,6 +37,7 @@ public enum ResultCode {
     FILE_TYPE_NOT_SUPPORT(2002, "不支持的文件类型"),
     FILE_UPLOAD_ERROR(2003, "文件上传失败"),
     FILE_NOT_FOUND(2004, "文件不存在"),
+    FILE_OCR_ERROR(2005, "OCR 识别失败"),
 
     // 业务模块段：3xxx AI 调用
     AI_INVOKE_ERROR(3001, "AI 模型调用失败"),

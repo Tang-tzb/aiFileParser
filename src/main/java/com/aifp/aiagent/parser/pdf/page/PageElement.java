@@ -8,9 +8,11 @@ import lombok.Data;
  * 页面元素：页内最小内容单元的轻量占位模型。
  * <p>
  * 阶段 3 起携带结构化文字信息（bbox/字号/字体）；表格结构、AST 级元素体系
- * 分别由阶段 5/6 与阶段 9 扩展。字段约定：
+ * 分别由阶段 5/6 与阶段 9 扩展。字段约定（按数据来源区分）：
  * <ul>
- *   <li>TEXT 元素：text 必填，bbox/fontSize/fontName 必填（来自 TextBlock）；</li>
+ *   <li>TEXT（PDF_TEXT 来源）：text 必填，bbox/fontSize/fontName 必填（来自 TextBlock）；</li>
+ *   <li>TEXT（OCR 来源，阶段 4）：text/bbox 必填（bbox 经 CoordinateTransformer
+ *       换算为 PDF 用户空间）；fontSize/fontName 为 null（Tesseract 不输出字体信息）；</li>
  *   <li>PENDING_OCR 元素：text 恒为空串，description 必填，bbox/fontSize/fontName 为 null。</li>
  * </ul>
  *

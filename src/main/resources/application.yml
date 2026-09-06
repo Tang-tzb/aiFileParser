@@ -182,3 +182,20 @@ document:
         space-gap-ratio: ${PDF_TEXT_SPACE_GAP_RATIO:0.25}
         # 行间距超过该系数×前行字号则分块
         block-gap-ratio: ${PDF_TEXT_BLOCK_GAP_RATIO:1.20}
+      # OCR 参数（阶段4：parser/ocr 识别层；兼容 Windows/Linux/Docker）
+      ocr:
+        # 识别引擎（多引擎扩展点，与条件装配联动）
+        engine: ${OCR_ENGINE:tesseract}
+        # 识别语言（中文简体）
+        language: ${OCR_LANGUAGE:chi_sim}
+        # 引擎可执行文件：默认走 PATH（裸命令名，三平台通吃）；本机安装器未写 PATH 时
+        # 经环境变量覆盖，如 Windows: C:\Program Files\Tesseract-OCR\tesseract.exe
+        tesseract-path: ${OCR_TESSERACT_PATH:tesseract}
+        # 页面渲染 DPI（禁默认超高分辨率）
+        render-dpi: ${OCR_RENDER_DPI:200}
+        # 页面分割模式（3=自动布局）
+        psm: ${OCR_PSM:3}
+        # 单页识别超时（秒）
+        timeout-seconds: ${OCR_TIMEOUT_SECONDS:300}
+        # 识别并发（资源限制：2CPU/8GB → 固定 1）
+        concurrency: ${OCR_CONCURRENCY:1}
