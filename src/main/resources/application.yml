@@ -271,3 +271,7 @@ document:
         ocr-digit-fix:
           # OCR 数字纠错总开关（仅作用于 source=OCR 的文本，PDF_TEXT/FUSION value 永不触碰）
           enabled: ${PDF_CLEAN_OCR_FIX:true}
+      # Markdown 渲染参数（阶段 11：parser/pdf/markdown，DocumentAst 纯投影）
+      markdown:
+        # 键值清单渲染开关：开启时每页 nodes 后追加“字段：值”（关闭则严格遵循阶段 9 契约）
+        key-values-enabled: ${PDF_MARKDOWN_KEY_VALUES:true}
