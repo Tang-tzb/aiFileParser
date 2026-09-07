@@ -256,3 +256,18 @@ document:
       structure:
         # 标题判定倍数：主字号 ≥ 页内 PDF_TEXT 中位字号×该值 且 ≤50 字符视为标题
         title-font-ratio: ${PDF_STRUCTURE_TITLE_FONT_RATIO:1.2}
+      # 结构清洗参数（阶段10：parser/pdf/clean，清洗发生在 DocumentAst 层）
+      clean:
+        line-join:
+          # 段模式"标题样"下一行守卫：下一行长度 ≤ 该值且无句末标点 → 保留换行
+          title-like-max-length: ${PDF_CLEAN_TITLE_LIKE_MAX:20}
+        header-footer:
+          # 跨页重复判定最小页数（不足则不做页眉页脚判定）
+          min-pages: ${PDF_CLEAN_HF_MIN_PAGES:2}
+          # 顶部带位比例：距页顶距离 ÷ 页高 ≤ 该值视为页顶带
+          top-band-ratio: ${PDF_CLEAN_HF_TOP_BAND:0.12}
+          # 底部带位比例：距页底距离（bbox.y）÷ 页高 ≤ 该值视为页底带
+          bottom-band-ratio: ${PDF_CLEAN_HF_BOTTOM_BAND:0.12}
+        ocr-digit-fix:
+          # OCR 数字纠错总开关（仅作用于 source=OCR 的文本，PDF_TEXT/FUSION value 永不触碰）
+          enabled: ${PDF_CLEAN_OCR_FIX:true}
