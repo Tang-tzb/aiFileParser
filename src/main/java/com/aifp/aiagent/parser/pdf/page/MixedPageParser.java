@@ -6,10 +6,10 @@ import com.aifp.aiagent.parser.ocr.*;
 import com.aifp.aiagent.parser.pdf.PageContentType;
 import com.aifp.aiagent.parser.pdf.PageImageRenderer;
 import com.aifp.aiagent.parser.pdf.PageProfile;
-import com.aifp.aiagent.parser.pdf.region.CoordinateMatcher;
-import com.aifp.aiagent.parser.pdf.region.OcrEligibilityEvaluator;
-import com.aifp.aiagent.parser.pdf.region.RegionAnalyzer;
-import com.aifp.aiagent.parser.pdf.region.VisualRegion;
+import com.aifp.aiagent.parser.pdf.layout.TableGrid;
+import com.aifp.aiagent.parser.pdf.layout.TableRecognitionInput;
+import com.aifp.aiagent.parser.pdf.layout.TableStructureRecognizer;
+import com.aifp.aiagent.parser.pdf.region.*;
 import com.aifp.aiagent.parser.pdf.text.BoundingBox;
 import com.aifp.aiagent.parser.pdf.text.PdfText;
 import com.aifp.aiagent.parser.pdf.text.PdfTextExtractor;
@@ -65,6 +65,7 @@ public class MixedPageParser implements PageParser {
     private final RegionAnalyzer regionAnalyzer;
     private final OcrEligibilityEvaluator eligibilityEvaluator;
     private final CoordinateMatcher coordinateMatcher;
+    private final TableStructureRecognizer tableStructureRecognizer;
 
     @Override
     public PageContentType supportedType() {
@@ -79,10 +80,11 @@ public class MixedPageParser implements PageParser {
         PdfText text = textExtractor.extract(context.getDocument(), context.getPageIndex());
         List<TextBlock> textBlocks = text.getBlocks();
 
-        // 2. 单页一次渲染 → 区域分析 → 区域级 OCR 融合
+        // 2. 单页一次渲染 → 区域分析 → 区域级 OCR 融合 → 表格结构恢复
         PageImageRenderer.RenderedPage rendered = null;
         List<PageElement> ocrElements = new ArrayList<>();
         List<PageElement> regionElements = new ArrayList<>();
+        List<TableGrid> tables = List.of();
         try {
             rendered = pageImageRenderer.renderToTempPng(context.getDocument(), context.getPageIndex());
             List<VisualRegion> regions = regionAnalyzer.analyze(context.getDocument(),
@@ -94,6 +96,8 @@ public class MixedPageParser implements PageParser {
                     ocrElements.addAll(ocrRegion(region, rendered, context, textBlocks));
                 }
             }
+            // 阶段 7：表格结构恢复（渲染临时文件删除之前，复用同一份渲染图）
+            tables = recognizeTables(regions, rendered, context, textBlocks);
         } catch (IOException e) {
             log.error("页面渲染失败 pageIndex={}", context.getPageIndex(), e);
             throw new BusinessException(ResultCode.FILE_PARSE_ERROR,
@@ -103,7 +107,38 @@ public class MixedPageParser implements PageParser {
         }
 
         return buildDocument(context, profile, fuseElements(mapTextElements(textBlocks),
-                ocrElements, regionElements));
+                ocrElements, regionElements), tables);
+    }
+
+    // ---------- 表格结构恢复（阶段 7） ----------
+
+    /**
+     * 表格结构恢复：存在 TABLE/likelyTable 区域时触发识别（渲染临时文件删除
+     * 之前执行，复用同一份渲染图，单页仅渲染一次的约束不变）。
+     * 失败语义：识别器内部全异常封闭；此处再兜底捕获，降级为空 tables 不中断解析。
+     */
+    private List<TableGrid> recognizeTables(List<VisualRegion> regions,
+                                            PageImageRenderer.RenderedPage rendered,
+                                            PageContext context, List<TextBlock> textBlocks) {
+        boolean hasTableCandidate = regions.stream()
+                .anyMatch(region -> region.getRegionType() == RegionType.TABLE || region.isLikelyTable());
+        if (!hasTableCandidate) {
+            return List.of();
+        }
+        try {
+            return tableStructureRecognizer.recognize(TableRecognitionInput.builder()
+                    .pageNumber(context.getPageNumber())
+                    .renderedPage(rendered.getImage())
+                    .dpi(rendered.getDpi())
+                    .pageWidth(context.getProfile().getPageWidth())
+                    .pageHeight(context.getProfile().getPageHeight())
+                    .textBlocks(textBlocks)
+                    .regions(regions)
+                    .build());
+        } catch (Exception e) {
+            log.warn("表格结构识别降级为空 pageNumber={}", context.getPageNumber(), e);
+            return List.of();
+        }
     }
 
     // ---------- 文字层映射 ----------
@@ -301,15 +336,17 @@ public class MixedPageParser implements PageParser {
     }
 
     /**
-     * 组装统一输出模型。
+     * 组装统一输出模型（tables：无表格时为空列表，向后兼容）。
      */
-    private PageDocument buildDocument(PageContext context, PageProfile profile, List<PageElement> elements) {
+    private PageDocument buildDocument(PageContext context, PageProfile profile,
+                                       List<PageElement> elements, List<TableGrid> tables) {
         return PageDocument.builder()
                 .pageNumber(context.getPageNumber())
                 .contentType(profile.getContentType())
                 .pageWidth(profile.getPageWidth())
                 .pageHeight(profile.getPageHeight())
                 .elements(elements)
+                .tables(tables)
                 .parserName(PARSER_NAME)
                 .build();
     }

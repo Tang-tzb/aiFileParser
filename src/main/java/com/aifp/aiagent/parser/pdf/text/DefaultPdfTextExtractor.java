@@ -45,6 +45,13 @@ public class DefaultPdfTextExtractor implements PdfTextExtractor {
     @Value("${document.parser.pdf.text.space-gap-ratio:0.25}")
     private double spaceGapRatio = 0.25;
     /**
+     * 行内分段的间隙系数（×字号；大于该值的几何间隙视为跨单元格边界——
+     * 制式表单同一视觉行横跨多列时按段切分，段为阶段 7 值绑定的原子单位；
+     * 取 2.0 远大于词间空格（约 0.3~1.0×字号），不会拆散字段内词语）
+     */
+    @Value("${document.parser.pdf.text.segment-gap-ratio:2.0}")
+    private double segmentGapRatio = 2.0;
+    /**
      * 行间距超过该系数×前行字号则分块
      */
     @Value("${document.parser.pdf.text.block-gap-ratio:1.20}")
@@ -133,16 +140,63 @@ public class DefaultPdfTextExtractor implements PdfTextExtractor {
     }
 
     /**
-     * 行内 X 排序重建行文字：几何间隙超过阈值处插入空格。
+     * 行内 X 排序重建行文字：几何间隙超过阈值处插入空格；
+     * 并按大几何间隙（&gt; segmentGapRatio × 字号）切分行内段——
+     * 制式表单同一视觉行常横跨多个表格单元格，段为表格值绑定的原子单位。
+     * 行文字 = 各段文字以空格连接（与逐字形插空格口径逐字节一致）。
      */
     private TextLine buildLine(List<Glyph> cluster) {
         List<Glyph> sorted = cluster.stream()
                 .sorted(Comparator.comparingDouble(g -> g.box.getX()))
                 .toList();
 
+        // 先按大间隙切段（段内再按小间隙插空格）
+        List<List<Glyph>> segmentGlyphs = new ArrayList<>();
+        List<Glyph> current = new ArrayList<>();
+        for (Glyph glyph : sorted) {
+            if (!current.isEmpty()) {
+                Glyph prev = current.get(current.size() - 1);
+                double gap = glyph.box.getX() - prev.box.right();
+                if (gap > segmentGapRatio * prev.fontSize) {
+                    segmentGlyphs.add(current);
+                    current = new ArrayList<>();
+                }
+            }
+            current.add(glyph);
+        }
+        if (!current.isEmpty()) {
+            segmentGlyphs.add(current);
+        }
+
+        List<TextLine.Segment> segments = new ArrayList<>(segmentGlyphs.size());
+        StringBuilder text = new StringBuilder();
+        for (List<Glyph> segment : segmentGlyphs) {
+            if (!text.isEmpty()) {
+                text.append(' ');
+            }
+            String segmentText = joinGlyphText(segment);
+            text.append(segmentText);
+            segments.add(new TextLine.Segment(segmentText, unionOfGlyphs(segment)));
+        }
+
+        FontKey dominant = dominantFontOfGlyphs(sorted);
+        return TextLine.builder()
+                .text(text.toString())
+                .bbox(unionOfGlyphs(sorted))
+                .fontSize(dominant.fontSize())
+                .fontName(dominant.fontName())
+                .segments(segments)
+                .build();
+    }
+
+    /**
+     * 段内文字重建：几何间隙超过 spaceGapRatio × 字号处插入空格
+     * （与历史行文字口径一致，保证 content 契约逐字节不变）。
+     */
+    private String joinGlyphText(List<Glyph> glyphs) {
         StringBuilder text = new StringBuilder();
         Glyph prev = null;
-        for (Glyph glyph : sorted) {
+        for (Glyph glyph : glyphs) {
             if (prev != null) {
                 double gap = glyph.box.getX() - prev.box.right();
                 if (gap > spaceGapRatio * prev.fontSize) {
@@ -152,14 +206,7 @@ public class DefaultPdfTextExtractor implements PdfTextExtractor {
             text.append(glyph.text);
             prev = glyph;
         }
-
-        FontKey dominant = dominantFontOfGlyphs(sorted);
-        return TextLine.builder()
-                .text(text.toString())
-                .bbox(unionOfGlyphs(sorted))
-                .fontSize(dominant.fontSize())
-                .fontName(dominant.fontName())
-                .build();
+        return text.toString();
     }
 
     /**

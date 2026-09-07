@@ -138,6 +138,25 @@ class DefaultRegionAnalyzerTest {
     }
 
     @Test
+    void fullPageBackground_notStampNorSignature() throws IOException {
+        // 整页底图（占页面积比 1.00 ≥ 0.85）即使含红色/低墨迹特征也归为 IMAGE：
+        // 底图上的印章/签名属于底图内容，区域级误标会向下游排除规则扩散
+        BoundingBox rect = BoundingBox.builder().x(0).y(0).width(PAGE_W).height(PAGE_H).build();
+        BufferedImage rendered = renderedPage(g -> {
+            g.setColor(Color.RED);
+            g.fillRect(400, pixelY(100f, 80), 80, 80);
+            g.setColor(Color.BLACK);
+            g.fillRect(120, pixelY(220f, 2), 160, 2);
+        });
+        try (PDDocument doc = pageWithImage(rect, 1)) {
+            List<VisualRegion> regions = analyzer.analyze(doc, 0, List.of(), rendered, 72f);
+            assertThat(regions).hasSize(1);
+            assertThat(regions.get(0).getRegionType()).isEqualTo(RegionType.IMAGE);
+            assertThat(regions.get(0).getPageAreaRatio()).isCloseTo(1.0, within(1e-6));
+        }
+    }
+
+    @Test
     void textBandInRegion_producesTextCandidateScore() throws IOException {
         // 单条 20pt 高的满宽暗带 → 1 个文本带 → score = min(1, 1/3)
         BoundingBox rect = BoundingBox.builder().x(100).y(400).width(200).height(150).build();

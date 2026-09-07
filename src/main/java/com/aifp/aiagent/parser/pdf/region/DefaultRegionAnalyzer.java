@@ -67,6 +67,14 @@ public class DefaultRegionAnalyzer implements RegionAnalyzer {
      */
     @Value("${document.parser.pdf.region.stamp-red-ratio:0.10}")
     private double stampRedRatio = 0.10;
+    /**
+     * 整页底图判定阈值（与检测层 full-image-ratio 同源，口径统一）：
+     * 占页面积比 ≥ 该值的图片区域视为整页扫描底图，直接归为 IMAGE，
+     * 不做 STAMP/SIGNATURE 启发式分类——底图上的印章/签名属于底图内容，
+     * 区域级误标会沿 STAMP/SIGNATURE 排除规则向下游扩散（如表头候选被误拒）。
+     */
+    @Value("${document.parser.pdf.detector.full-image-ratio:0.85}")
+    private double fullPageImageRatio = 0.85;
 
     private static boolean isDark(int rgb) {
         int r = (rgb >> 16) & 0xFF;
@@ -143,9 +151,9 @@ public class DefaultRegionAnalyzer implements RegionAnalyzer {
                                           float dpi, float pageHeight, double pageArea,
                                           List<TextBlock> textBlocks) {
         PixelStats stats = analyzePixels(placement, renderedImage, dpi, pageHeight);
-        RegionType type = classify(stats, placement, renderedImage, pageHeight);
         double pageAreaRatio = pageArea > 0
                 ? (double) placement.getWidth() * placement.getHeight() / pageArea : 0;
+        RegionType type = classify(stats, placement, renderedImage, pageHeight, pageAreaRatio);
         return VisualRegion.builder()
                 .regionType(type)
                 .bbox(placement)
@@ -161,10 +169,20 @@ public class DefaultRegionAnalyzer implements RegionAnalyzer {
 
     // ---------- 像素采样与文本候选 ----------
 
+    /**
+     * 区域分类启发式。整页底图（pageAreaRatio ≥ full-page-ratio）直接归为
+     * IMAGE——印章/签名启发式仅适用于局部小图，整页底图误标会向下游
+     * （表头候选排除、OCR 决策）扩散。
+     */
     private RegionType classify(PixelStats stats, BoundingBox placement,
-                                BufferedImage renderedImage, float pageHeight) {
+                                BufferedImage renderedImage, float pageHeight,
+                                double pageAreaRatio) {
         if (renderedImage == null) {
             return RegionType.UNKNOWN;
+        }
+        // 整页底图：跳过 STAMP/SIGNATURE 启发式（底图内容含印章不等于区域是印章）
+        if (pageAreaRatio >= fullPageImageRatio) {
+            return RegionType.IMAGE;
         }
         if (stats.redRatio >= stampRedRatio) {
             return RegionType.STAMP;

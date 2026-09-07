@@ -5,6 +5,8 @@ import com.aifp.aiagent.exception.BusinessException;
 import com.aifp.aiagent.parser.ocr.*;
 import com.aifp.aiagent.parser.pdf.PageContentType;
 import com.aifp.aiagent.parser.pdf.PageProfile;
+import com.aifp.aiagent.parser.pdf.layout.TableCell;
+import com.aifp.aiagent.parser.pdf.layout.TableGrid;
 import com.aifp.aiagent.parser.pdf.region.OcrEligibilityEvaluator;
 import com.aifp.aiagent.parser.pdf.region.RegionAnalyzer;
 import com.aifp.aiagent.parser.pdf.region.RegionType;
@@ -48,8 +50,18 @@ class MixedPageParserTest {
     /**
      * 构建注入桩区域分析器的解析器（区域序列 = 给定 regions，绕过像素分类，
      * 使 OCR 路由决策可精确断言；真实区域分析由 DefaultRegionAnalyzerTest 覆盖）。
+     * 表格识别使用真实 Hybrid 链路。
      */
     private MixedPageParser parserWithRegions(VisualRegion... regions) {
+        return parserWithRegions(PdfPageTestSupport.buildHybridTableRecognizer(ocr), regions);
+    }
+
+    /**
+     * 构建指定表格识别器的解析器（表格触发/降级测试注入桩）。
+     */
+    private MixedPageParser parserWithRegions(
+            com.aifp.aiagent.parser.pdf.layout.TableStructureRecognizer tableRecognizer,
+            VisualRegion... regions) {
         RegionAnalyzer stubAnalyzer = (doc, idx, blocks, image, dpi) -> List.of(regions);
         return new MixedPageParser(
                 new DefaultPdfTextExtractor(new PdfCoordinateConverter()),
@@ -57,7 +69,8 @@ class MixedPageParserTest {
                 ocr,
                 stubAnalyzer,
                 new OcrEligibilityEvaluator(),
-                new com.aifp.aiagent.parser.pdf.region.CoordinateMatcher(transformer));
+                new com.aifp.aiagent.parser.pdf.region.CoordinateMatcher(transformer),
+                tableRecognizer);
     }
 
     private VisualRegion region(RegionType type, BoundingBox bbox, boolean likelyTable,
@@ -303,6 +316,109 @@ class MixedPageParserTest {
     }
 
     // ---------- 失败语义 ----------
+
+    // ---------- 阶段 7：表格结构恢复集成 ----------
+
+    @Test
+    void tablePage_endToEnd_cellsRecovered_withHardAssertions() throws Exception {
+        File pdf = tempDir.resolve("t1.pdf").toFile();
+        PdfPageTestSupport.buildTablePagePdf(pdf);
+        ocr.results.add(CapturingOcr.empty());
+        MixedPageParser parser = parserWithRegions(region(RegionType.TABLE,
+                BoundingBox.builder().x(100).y(300).width(400).height(300).build(), true, 0, 0));
+
+        PageDocument result = parse(pdf, parser);
+
+        assertThat(result.getTables()).hasSize(1);
+        TableGrid grid = result.getTables().get(0);
+        assertThat(grid.getRowCount()).isEqualTo(3);
+        assertThat(grid.getColumnCount()).isEqualTo(2);
+        // H3：每个有效 TableCell 必须有明确 bbox（宽高 > 0）
+        for (TableCell cell : grid.getCells()) {
+            assertThat(cell.getBoundingBox()).as("cell(%d,%d) bbox",
+                    cell.getRowIndex(), cell.getColumnIndex()).isNotNull();
+            assertThat(cell.getBoundingBox().getWidth()).isPositive();
+            assertThat(cell.getBoundingBox().getHeight()).isPositive();
+        }
+        // H2：相邻字段不串列——标签/值各归其列；多行值 = 一个 Cell
+        assertThat(valueOf(grid, 0, 0)).isEqualTo("DanWei");
+        assertThat(valueOf(grid, 0, 1)).isEqualTo("XXGS");
+        assertThat(valueOf(grid, 1, 0)).isEqualTo("MianJi");
+        assertThat(valueOf(grid, 1, 1)).isEqualTo("1000pm");
+        assertThat(valueOf(grid, 2, 0)).isEqualTo("DiDian");
+        assertThat(valueOf(grid, 2, 1)).isEqualTo("CityA\nRoad88");
+        // H1：value 对应的全部 TextBlock 必须位于 TableCell bbox 内（容差 2pt）
+        try (PDDocument doc = Loader.loadPDF(pdf)) {
+            List<TextBlock> blocks = new DefaultPdfTextExtractor(new PdfCoordinateConverter())
+                    .extract(doc, 0).getBlocks();
+            for (TextBlock block : blocks) {
+                TableCell cell = cellByValue(grid, block.getText());
+                assertThat(cell).as("block [%s] 应绑定到单元格", block.getText()).isNotNull();
+                assertThat(cell.getBoundingBox().expand(2f).contains(block.getBbox()))
+                        .as("block [%s] 应位于 cell(%d,%d) bbox 内", block.getText(),
+                                cell.getRowIndex(), cell.getColumnIndex())
+                        .isTrue();
+            }
+        }
+        // 值单元格来源约定：PDF_TEXT / confidence=1.0
+        assertThat(grid.getCells()).allSatisfy(cell -> {
+            assertThat(cell.getSource()).isEqualTo(ElementSource.PDF_TEXT);
+            assertThat(cell.getConfidence()).isCloseTo(1.0f, within(0.01f));
+        });
+    }
+
+    @Test
+    void tableRecognizerThrows_tablesEmpty_parseContinues() throws Exception {
+        File pdf = tempDir.resolve("t2.pdf").toFile();
+        PdfPageTestSupport.buildTextPagePdf(pdf);
+        ocr.results.add(CapturingOcr.empty());
+        com.aifp.aiagent.parser.pdf.layout.TableStructureRecognizer throwing = input -> {
+            throw new IllegalStateException("boom");
+        };
+        MixedPageParser parser = parserWithRegions(throwing, region(RegionType.TABLE,
+                BoundingBox.builder().x(100).y(400).width(200).height(150).build(), true, 0, 0));
+
+        PageDocument result = parse(pdf, parser);
+
+        assertThat(result.getTables()).isEmpty();
+        assertThat(result.getElements()).isNotEmpty();
+    }
+
+    @Test
+    void noTableCandidate_recognizerNotCalled() throws Exception {
+        File pdf = tempDir.resolve("t3.pdf").toFile();
+        PdfPageTestSupport.buildTextPagePdf(pdf);
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        com.aifp.aiagent.parser.pdf.layout.TableStructureRecognizer counting = input -> {
+            calls.incrementAndGet();
+            return java.util.List.of();
+        };
+        MixedPageParser parser = parserWithRegions(counting, region(RegionType.STAMP,
+                BoundingBox.builder().x(400).y(600).width(80).height(80).build(), false, 0, 0));
+
+        PageDocument result = parse(pdf, parser);
+
+        assertThat(calls.get()).isZero();
+        assertThat(result.getTables()).isEmpty();
+    }
+
+    // ---------- 表格集成辅助 ----------
+
+    private String valueOf(TableGrid grid, int row, int col) {
+        TableCell cell = grid.getCells().stream()
+                .filter(c -> c.getRowIndex() == row && c.getColumnIndex() == col)
+                .findFirst()
+                .orElse(null);
+        assertThat(cell).as("cell(%d,%d) 应存在", row, col).isNotNull();
+        return cell.getValue();
+    }
+
+    private TableCell cellByValue(TableGrid grid, String value) {
+        return grid.getCells().stream()
+                .filter(c -> value.equals(c.getValue()))
+                .findFirst()
+                .orElse(null);
+    }
 
     private BoundingBox region0() {
         return BoundingBox.builder().x(100).y(400).width(200).height(150).build();

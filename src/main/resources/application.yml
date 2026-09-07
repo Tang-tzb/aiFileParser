@@ -180,6 +180,8 @@ document:
         line-tolerance-ratio: ${PDF_TEXT_LINE_TOLERANCE_RATIO:0.50}
         # 行内插空格的间隙系数（×字号；Helvetica 空格步进 0.278em，需小于该值方可还原空格）
         space-gap-ratio: ${PDF_TEXT_SPACE_GAP_RATIO:0.25}
+        # 行内分段的间隙系数（×字号；大间隙视为跨单元格边界，段为表格值绑定原子单位）
+        segment-gap-ratio: ${PDF_TEXT_SEGMENT_GAP_RATIO:2.0}
         # 行间距超过该系数×前行字号则分块
         block-gap-ratio: ${PDF_TEXT_BLOCK_GAP_RATIO:1.20}
       # OCR 参数（阶段4：parser/ocr 识别层；兼容 Windows/Linux/Docker）
@@ -213,3 +215,37 @@ document:
         spatial-tolerance-pt: ${PDF_REGION_SPATIAL_TOLERANCE_PT:2.0}
         # 整页图豁免阈值：区域占页面积比 ≥ 该值 → 恒不区域 OCR（禁变相整页 OCR）
         full-page-forbidden-ratio: ${PDF_REGION_FULL_PAGE_FORBIDDEN_RATIO:0.85}
+      # 表格结构恢复参数（阶段7：parser/pdf/layout）
+      table:
+        # 横线最短行程占页宽比（文字笔画不可达）
+        min-h-line-ratio: ${PDF_TABLE_MIN_H_LINE_RATIO:0.15}
+        # 竖线最短行程占页高比（防大号标题笔画误报）
+        min-v-line-ratio: ${PDF_TABLE_MIN_V_LINE_RATIO:0.12}
+        # 灰度二值阈值（覆盖浅灰色表格线，见 ImageTableRecognizer 说明）
+        dark-threshold: ${PDF_TABLE_DARK_THRESHOLD:200}
+        # 单元格边存在性判定：单段采样暗点占比
+        edge-verify-ratio: ${PDF_TABLE_EDGE_VERIFY_RATIO:0.70}
+        # 公共边分段的段长（pt，多段投票粒度）
+        edge-segment-pt: ${PDF_TABLE_EDGE_SEGMENT_PT:16.0}
+        # 公共边存在判定：通过段数占比（多数投票）
+        edge-vote-ratio: ${PDF_TABLE_EDGE_VOTE_RATIO:0.60}
+        # 共线线段合并间距（pt）
+        line-merge-gap-pt: ${PDF_TABLE_LINE_MERGE_GAP_PT:3.0}
+        # 格网有效性：交点存在率下限（嵌套布局制式表单会稀释整格交点率，防误判由包住率兜底）
+        grid-intersection-density-min: ${PDF_TABLE_GRID_INTERSECTION_DENSITY_MIN:0.20}
+        # 图像格网有效性：原生文字行包住率
+        grid-text-containment-ratio: ${PDF_TABLE_GRID_TEXT_CONTAINMENT:0.60}
+        # 值归属主判定：文字块被单元格覆盖面积占比
+        value-coverage-ratio: ${PDF_TABLE_VALUE_COVERAGE_RATIO:0.60}
+        # 中心点辅助最低覆盖率（段级兜底仅兜轻微出格；跨格合并行由段级切分+块级守卫拦截）
+        center-fallback-min-coverage: ${PDF_TABLE_CENTER_FALLBACK_MIN_COVERAGE:0.50}
+        # 方式二：纵排续行合并的行距因子
+        coord-row-gap-factor: ${PDF_TABLE_COORD_ROW_GAP_FACTOR:1.5}
+        # 表头 OCR 开关（失败自动降级 header=null）
+        header-ocr-enabled: ${PDF_TABLE_HEADER_OCR_ENABLED:true}
+        # 表头 OCR 置信度下限（低于视为无效表头，降级 header=null，防竖排/图形垃圾绑定）
+        header-min-confidence: ${PDF_TABLE_HEADER_MIN_CONFIDENCE:0.60}
+        # 表头候选：墨迹占比下限（低于视为空白格；高单元格墨量稀释，仅作廉价初筛）
+        label-ink-ratio: ${PDF_TABLE_LABEL_INK_RATIO:0.005}
+        # 表头候选：墨迹占比上限（高于视为图片/图形，普通 IMAGE 型数据 Cell 排除）
+        header-max-ink-ratio: ${PDF_TABLE_HEADER_MAX_INK_RATIO:0.50}

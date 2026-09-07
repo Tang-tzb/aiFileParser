@@ -1,6 +1,7 @@
 package com.aifp.aiagent.parser.pdf.page;
 
 import com.aifp.aiagent.parser.pdf.PageContentType;
+import com.aifp.aiagent.parser.pdf.layout.TableGrid;
 import lombok.Builder;
 import lombok.Data;
 
@@ -42,6 +43,12 @@ public class PageDocument {
      * 页内元素列表（EMPTY 页为空列表）
      */
     private List<PageElement> elements;
+
+    /**
+     * 表格结构列表（阶段 7 新增；无表格候选/识别失败降级为空列表，向后兼容）
+     */
+    @Builder.Default
+    private List<TableGrid> tables = List.of();
 
     /**
      * 产出本页文档的解析器名（路由验收证据）
