@@ -101,7 +101,8 @@ public class ImagePageParser implements PageParser {
     }
 
     /**
-     * SUCCESS 映射：lineNo 连续行段 → TEXT 元素（词空格连接、坐标换算后 union）。
+     * SUCCESS 映射：lineNo 连续行段 → TEXT 元素（词空格连接、坐标换算后 union、
+     * confidence = 行内词置信度均值，对齐 PageElement 契约与 MixedPageParser 口径）。
      */
     private List<PageElement> mapSuccessLines(OcrResult result, PageContext context,
                                               PageImageRenderer.RenderedPage rendered) {
@@ -115,9 +116,21 @@ public class ImagePageParser implements PageParser {
                     .bbox(lineBbox(line, rendered, context))
                     .fontSize(null)
                     .fontName(null)
+                    .confidence(lineConfidence(line))
                     .build());
         }
         return elements;
+    }
+
+    /**
+     * 行置信度：行内词置信度均值（0~100 口径，AST 层归一）。
+     */
+    private float lineConfidence(List<OcrWord> line) {
+        float sum = 0f;
+        for (OcrWord word : line) {
+            sum += word.getConfidence();
+        }
+        return line.isEmpty() ? 0f : sum / line.size();
     }
 
     /**

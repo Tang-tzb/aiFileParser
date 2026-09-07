@@ -252,3 +252,7 @@ document:
         # 文字层检查主判定：原生文字段与候选格空间覆盖率阈值（有文字层的格不进表头 OCR，
         # §十"OCR 只对缺少文字层的视觉区域补充"；center-in-cell 为 0.50 常量辅助）
         header-native-text-coverage: ${PDF_TABLE_HEADER_NATIVE_TEXT_COVERAGE:0.60}
+      # 结构识别参数（阶段9：parser/pdf/structure AST 组装层）
+      structure:
+        # 标题判定倍数：主字号 ≥ 页内 PDF_TEXT 中位字号×该值 且 ≤50 字符视为标题
+        title-font-ratio: ${PDF_STRUCTURE_TITLE_FONT_RATIO:1.2}
