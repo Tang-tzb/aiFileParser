@@ -249,3 +249,6 @@ document:
         label-ink-ratio: ${PDF_TABLE_LABEL_INK_RATIO:0.005}
         # 表头候选：墨迹占比上限（高于视为图片/图形，普通 IMAGE 型数据 Cell 排除）
         header-max-ink-ratio: ${PDF_TABLE_HEADER_MAX_INK_RATIO:0.50}
+        # 文字层检查主判定：原生文字段与候选格空间覆盖率阈值（有文字层的格不进表头 OCR，
+        # §十"OCR 只对缺少文字层的视觉区域补充"；center-in-cell 为 0.50 常量辅助）
+        header-native-text-coverage: ${PDF_TABLE_HEADER_NATIVE_TEXT_COVERAGE:0.60}

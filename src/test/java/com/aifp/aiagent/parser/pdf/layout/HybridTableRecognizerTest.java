@@ -191,6 +191,76 @@ class HybridTableRecognizerTest {
         assertThat(valueCell.getConfidence()).isCloseTo(1.0f, within(0.01f));
     }
 
+    @Test
+    void headerOcrLowConfidence_headerNull_valueStaysPdfText() {
+        BufferedImage image = gridImage();
+        Graphics2D g = image.createGraphics();
+        g.setColor(Color.BLACK);
+        g.fillRect(60, 70, 40, 10);
+        g.fillRect(60, 95, 40, 10);
+        g.fillRect(60, 120, 40, 10);
+        g.dispose();
+        // SUCCESS 但置信度 0.30 < header-min-confidence(0.60)：
+        // 低置信度不得强制修正，允许进入 fallback（header=null 优雅降级）
+        ocr.results.add(StubOcr.success("模糊文字", 30f));
+
+        TableGrid grid = singleGrid(input(image, block("XX公司", 170, 290, 60, 12)));
+
+        assertThat(ocr.requests).hasSize(1);
+        // 表头格无值无 header 被过滤；值单元格保持 PDF_TEXT、header=null
+        assertThat(grid.getCells()).hasSize(1);
+        TableCell valueCell = grid.getCells().get(0);
+        assertThat(valueCell.getValue()).isEqualTo("XX公司");
+        assertThat(valueCell.getHeader()).isNull();
+        assertThat(valueCell.getSource()).isEqualTo(ElementSource.PDF_TEXT);
+        assertThat(valueCell.getConfidence()).isCloseTo(1.0f, within(0.01f));
+    }
+
+    @Test
+    void cropBeyondCell_ocrSkipped_headerNull() {
+        // 桩：toPdfBox 回换框整体右移 20pt（模拟坐标变换口径不一致）。
+        // 偏移量必须小于图宽余量：过大会令移位格的像素投影越出渲染图，
+        // 使 analyzeCrop 越界而非走回验路径
+        BufferedImage image = gridImage();
+        Graphics2D g = image.createGraphics();
+        g.setColor(Color.BLACK);
+        // 墨迹带画在移位后 cell(0,1) 的像素投影 (170..270, 50..150) 内
+        g.fillRect(180, 70, 40, 10);
+        g.fillRect(180, 95, 40, 10);
+        g.fillRect(180, 120, 40, 10);
+        g.dispose();
+        CoordinateMatcher inconsistent = new CoordinateMatcher(transformer) {
+            @Override
+            public BoundingBox toPdfBox(BoundingBox pixelBox, float dpi, float pageHeight) {
+                BoundingBox pdf = super.toPdfBox(pixelBox, dpi, pageHeight);
+                return BoundingBox.builder()
+                        .x(pdf.getX() + 20f).y(pdf.getY())
+                        .width(pdf.getWidth()).height(pdf.getHeight())
+                        .build();
+            }
+        };
+
+        // 值文字 (100..160, 290..302) 落在移位后 cell(0,0)=(70..170, 250..350) 内
+        // → 文字包住率达标，图像格网仍被采用
+        TableGrid grid = new HybridTableRecognizer(
+                new ImageTableRecognizer(inconsistent),
+                new CoordinateTableRecognizer(),
+                new HeaderCandidateDetector(inconsistent),
+                inconsistent,
+                ocr)
+                .recognize(input(image, block("XX公司", 100, 290, 60, 12)))
+                .get(0);
+
+        // 回验失败：OCR 未发起（不 OCR 超格内容）
+        assertThat(ocr.requests).isEmpty();
+        // 表头格被过滤，值格保持 PDF_TEXT、header=null（优雅降级）
+        assertThat(grid.getCells()).hasSize(1);
+        TableCell valueCell = grid.getCells().get(0);
+        assertThat(valueCell.getValue()).isEqualTo("XX公司");
+        assertThat(valueCell.getHeader()).isNull();
+        assertThat(valueCell.getSource()).isEqualTo(ElementSource.PDF_TEXT);
+    }
+
     // ---------- 异常封闭 ----------
 
     @Test

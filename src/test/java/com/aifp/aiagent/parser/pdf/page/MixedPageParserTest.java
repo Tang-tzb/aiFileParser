@@ -365,6 +365,19 @@ class MixedPageParserTest {
             assertThat(cell.getSource()).isEqualTo(ElementSource.PDF_TEXT);
             assertThat(cell.getConfidence()).isCloseTo(1.0f, within(0.01f));
         });
+        // 阶段 8 审计：全部 OCR 请求（区域 OCR + 表头 OCR）均为局部裁剪，
+        // 裁剪面积占整页比 < 0.25（§十"不能整页 OCR"固化）
+        assertThat(ocr.requests).isNotEmpty();
+        for (OcrRequest request : ocr.requests) {
+            double pagePixels = (PAGE_W * request.getDpi() / 72d)
+                    * (PAGE_H * request.getDpi() / 72d);
+            double cropRatio = (double) request.getImageWidth() * request.getImageHeight()
+                    / pagePixels;
+            assertThat(cropRatio)
+                    .as("OCR 裁剪面积占比（%dx%d @%ddpi）", request.getImageWidth(),
+                            request.getImageHeight(), request.getDpi())
+                    .isLessThan(0.25);
+        }
     }
 
     @Test

@@ -5,6 +5,8 @@ import com.aifp.aiagent.parser.pdf.region.RegionType;
 import com.aifp.aiagent.parser.pdf.region.VisualRegion;
 import com.aifp.aiagent.parser.pdf.text.BoundingBox;
 import com.aifp.aiagent.parser.pdf.text.SimpleCoordinateTransformer;
+import com.aifp.aiagent.parser.pdf.text.TextBlock;
+import com.aifp.aiagent.parser.pdf.text.TextLine;
 import org.junit.jupiter.api.Test;
 
 import java.awt.*;
@@ -36,7 +38,7 @@ class HeaderCandidateDetectorTest {
         TableCell cell = cell(0, 0, 40, 250, 100, 100, "数据");
 
         List<HeaderCandidateDetector.HeaderCandidate> candidates =
-                detector.detect(List.of(cell), baseImage(), DPI, IMG_H, List.of());
+                detector.detect(List.of(cell), baseImage(), DPI, IMG_H, List.of(), List.of());
 
         assertThat(candidates).isEmpty();
     }
@@ -50,7 +52,7 @@ class HeaderCandidateDetectorTest {
         BufferedImage image = imageWithBands(50, 40, 70, 95, 120);
 
         List<HeaderCandidateDetector.HeaderCandidate> candidates =
-                detector.detect(List.of(cell), image, DPI, IMG_H, List.of());
+                detector.detect(List.of(cell), image, DPI, IMG_H, List.of(), List.of());
 
         assertThat(candidates).hasSize(1);
         assertThat(candidates.get(0).cell()).isSameAs(cell);
@@ -65,7 +67,7 @@ class HeaderCandidateDetectorTest {
         BufferedImage image = imageWithBands(170, 40, 70, 95, 120);
 
         List<HeaderCandidateDetector.HeaderCandidate> candidates =
-                detector.detect(List.of(topCell, valueCell), image, DPI, IMG_H, List.of());
+                detector.detect(List.of(topCell, valueCell), image, DPI, IMG_H, List.of(), List.of());
 
         assertThat(candidates).hasSize(1);
         assertThat(candidates.get(0).cell()).isSameAs(topCell);
@@ -82,7 +84,7 @@ class HeaderCandidateDetectorTest {
         BufferedImage image = imageWithBands(70, 40, 270, 295, 320);
 
         List<HeaderCandidateDetector.HeaderCandidate> candidates =
-                detector.detect(List.of(c0, c1, c2, v0), image, DPI, IMG_H, List.of());
+                detector.detect(List.of(c0, c1, c2, v0), image, DPI, IMG_H, List.of(), List.of());
 
         assertThat(candidates).hasSize(1);
         assertThat(candidates.get(0).cell()).isSameAs(c1);
@@ -97,7 +99,7 @@ class HeaderCandidateDetectorTest {
         BufferedImage image = imageWithBands(70, 40, 70, 95, 120);
 
         List<HeaderCandidateDetector.HeaderCandidate> candidates =
-                detector.detect(List.of(valueCell, middleCell), image, DPI, IMG_H, List.of());
+                detector.detect(List.of(valueCell, middleCell), image, DPI, IMG_H, List.of(), List.of());
 
         assertThat(candidates).isEmpty();
     }
@@ -109,7 +111,7 @@ class HeaderCandidateDetectorTest {
         TableCell cell = cell(1, 0, 40, 250, 100, 100, null);
 
         List<HeaderCandidateDetector.HeaderCandidate> candidates =
-                detector.detect(List.of(cell), baseImage(), DPI, IMG_H, List.of());
+                detector.detect(List.of(cell), baseImage(), DPI, IMG_H, List.of(), List.of());
 
         assertThat(candidates).isEmpty();
     }
@@ -124,7 +126,7 @@ class HeaderCandidateDetectorTest {
         g.fillRect(40, 50, 100, 100);
         g.dispose();
 
-        assertThat(detector.detect(List.of(cell), image, DPI, IMG_H, List.of())).isEmpty();
+        assertThat(detector.detect(List.of(cell), image, DPI, IMG_H, List.of(), List.of())).isEmpty();
     }
 
     // ---------- 印章 / 区域排除 ----------
@@ -138,7 +140,7 @@ class HeaderCandidateDetectorTest {
         g.fillRect(40, 50, 100, 100);
         g.dispose();
 
-        assertThat(detector.detect(List.of(cell), image, DPI, IMG_H, List.of())).isEmpty();
+        assertThat(detector.detect(List.of(cell), image, DPI, IMG_H, List.of(), List.of())).isEmpty();
     }
 
     @Test
@@ -154,10 +156,82 @@ class HeaderCandidateDetectorTest {
                 .build();
 
         assertThat(detector.detect(List.of(cell), baseImage(), DPI, IMG_H,
-                List.of(stamp))).isEmpty();
+                List.of(stamp), List.of())).isEmpty();
+    }
+
+    // ---------- 文字层检查（阶段 8：§十"OCR 只对缺少文字层的视觉区域补充"） ----------
+
+    @Test
+    void segmentCoveragePrimary_rejected() {
+        // 段完全落在候选格内（coverage=1.0 ≥ 0.60 主判定）→ 存在文字层，排除
+        TableCell cell = cell(1, 0, 40, 250, 100, 100, null);
+        TextBlock block = blockWithSegment("原生标签",
+                BoundingBox.builder().x(60).y(270).width(60).height(60).build());
+        BufferedImage image = imageWithBands(50, 40, 70, 95, 120);
+
+        assertThat(detector.detect(List.of(cell), image, DPI, IMG_H,
+                List.of(), List.of(block))).isEmpty();
+    }
+
+    @Test
+    void segmentCenterAuxiliary_rejected() {
+        // 段 56% 覆盖且中心在候选格内（主判定未达 0.60，辅助 ≥0.50 兜住）→ 排除
+        TableCell cell = cell(1, 0, 40, 250, 100, 100, null);
+        TextBlock block = blockWithSegment("跨格文字",
+                BoundingBox.builder().x(95).y(270).width(80).height(60).build());
+        BufferedImage image = imageWithBands(50, 40, 70, 95, 120);
+
+        assertThat(detector.detect(List.of(cell), image, DPI, IMG_H,
+                List.of(), List.of(block))).isEmpty();
+    }
+
+    @Test
+    void crossCellSegment_notMisjudged() {
+        // 段仅 12.5% 落在候选格且中心在邻格（跨格段）→ 主/辅判定均不触发，真候选保留
+        TableCell cell = cell(1, 0, 40, 250, 100, 100, null);
+        TextBlock block = blockWithSegment("跨格文字",
+                BoundingBox.builder().x(130).y(270).width(80).height(60).build());
+        BufferedImage image = imageWithBands(50, 40, 70, 95, 120);
+
+        List<HeaderCandidateDetector.HeaderCandidate> candidates =
+                detector.detect(List.of(cell), image, DPI, IMG_H, List.of(), List.of(block));
+
+        assertThat(candidates).hasSize(1);
+        assertThat(candidates.get(0).cell()).isSameAs(cell);
+    }
+
+    @Test
+    void nativeTextOutsideCell_stillCandidate() {
+        // 原生文字完全在候选格外 → 不影响候选资格
+        TableCell cell = cell(1, 0, 40, 250, 100, 100, null);
+        TextBlock block = blockWithSegment("远处文字",
+                BoundingBox.builder().x(200).y(60).width(50).height(40).build());
+        BufferedImage image = imageWithBands(50, 40, 70, 95, 120);
+
+        List<HeaderCandidateDetector.HeaderCandidate> candidates =
+                detector.detect(List.of(cell), image, DPI, IMG_H, List.of(), List.of(block));
+
+        assertThat(candidates).hasSize(1);
+        assertThat(candidates.get(0).cell()).isSameAs(cell);
     }
 
     // ---------- 夹具 ----------
+
+    /**
+     * 构造含单段文字行的 TextBlock（文字层判定的原子单元 = 段级 bbox）。
+     */
+    private TextBlock blockWithSegment(String text, BoundingBox segmentBbox) {
+        TextLine line = TextLine.builder()
+                .text(text)
+                .bbox(segmentBbox)
+                .segments(List.of(new TextLine.Segment(text, segmentBbox)))
+                .build();
+        return TextBlock.builder()
+                .text(text)
+                .bbox(segmentBbox)
+                .lines(List.of(line))
+                .build();
+    }
 
     private TableCell cell(int row, int col, float x, float y, float w, float h, String value) {
         return TableCell.builder()

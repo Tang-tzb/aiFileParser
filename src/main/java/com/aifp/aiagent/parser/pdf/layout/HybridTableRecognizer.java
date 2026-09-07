@@ -391,8 +391,10 @@ public class HybridTableRecognizer implements TableStructureRecognizer {
     // ---------- 临时文件与内部模型 ----------
 
     /**
-     * 表头链路：HeaderCandidateDetector 筛选候选 → 仅候选裁剪 OCR（失败降级
-     * header=null）→ 值单元格绑定行重叠、列在其左侧的最近表头（FUSION）。
+     * 表头链路：HeaderCandidateDetector 筛选候选（含<b>文字层门</b>——仅缺少
+     * 原生文字层的格进 OCR，§十"只对缺少文字层的视觉区域补充"）→ 仅候选
+     * <b>裁剪回验</b>+ OCR（超差/失败/低置信度均优雅降级 header=null，不中断）
+     * → 值单元格绑定行重叠、列在其左侧的最近表头（FUSION）。
      */
     private void bindHeaders(TableGrid grid, TableRecognitionInput input) {
         if (!headerOcrEnabled) {
@@ -400,7 +402,7 @@ public class HybridTableRecognizer implements TableStructureRecognizer {
         }
         List<HeaderCandidateDetector.HeaderCandidate> candidates = headerCandidateDetector.detect(
                 grid.getCells(), input.getRenderedPage(), input.getDpi(),
-                input.getPageHeight(), input.getRegions());
+                input.getPageHeight(), input.getRegions(), input.getTextBlocks());
         List<TableCell> headerCells = new ArrayList<>(candidates.size());
         for (HeaderCandidateDetector.HeaderCandidate candidate : candidates) {
             OcrHeader header = ocrHeaderRegion(candidate.cell(), input);
@@ -430,14 +432,21 @@ public class HybridTableRecognizer implements TableStructureRecognizer {
     }
 
     /**
-     * 表头区域 OCR：候选单元格裁剪（临时 PNG 即用即删）→ 识别 →
-     * 词按 lineNo 分行、行内空格连接、行间 \n 连接；confidence = 全词均值/100。
+     * 表头区域 OCR：候选单元格裁剪 → <b>裁剪回验</b>（不超出候选格，违反即
+     * 降级）→ 临时 PNG 即用即删 → 识别 → 词按 lineNo 分行、行内空格连接、
+     * 行间 \n 连接；confidence = 全词均值/100。
      * FAILED/EMPTY/异常 → null（优雅降级，不中断）。
      */
     private OcrHeader ocrHeaderRegion(TableCell cell, TableRecognitionInput input) {
         int[] crop = coordinateMatcher.pixelCropBounds(cell.getBoundingBox(), input.getDpi(),
                 input.getPageHeight(), input.getRenderedPage().getWidth(),
                 input.getRenderedPage().getHeight());
+        if (!isCropWithinCell(crop, cell.getBoundingBox(), input.getDpi(), input.getPageHeight())) {
+            log.warn("表头裁剪超出候选单元格，放弃 OCR 降级 cell=({},{}) crop={},{},{},{}",
+                    cell.getRowIndex(), cell.getColumnIndex(),
+                    crop[0], crop[1], crop[2], crop[3]);
+            return null;
+        }
         File cropFile = null;
         try {
             cropFile = writeCropTempPng(input.getRenderedPage(), crop);
@@ -476,6 +485,26 @@ public class HybridTableRecognizer implements TableStructureRecognizer {
         } finally {
             deleteQuietly(cropFile);
         }
+    }
+
+    /**
+     * 裁剪回验：crop（像素）经 {@link CoordinateMatcher#toPdfBox} 往返回换
+     * PDF 空间后，必须落在候选 Cell bbox 外扩容差内——<b>裁剪 bbox 不得超出
+     * 候选单元格</b>（§十"OCR 只对 Header Region 补充"的阶段 8 收紧）。
+     * <p>
+     * {@link CoordinateMatcher#pixelCropBounds} 采用 floor/ceil <b>外扩舍入</b>
+     * （≤1px）且仅按图像边界收拢，容差取 {@code dpi/72（1px 的 pt 当量）+
+     * 0.5pt 裕量}；超差说明坐标变换口径不一致或实现缺陷，按降级原则放弃该格
+     * 表头 OCR（不 OCR 超格内容，header=null 优雅降级）。
+     */
+    private boolean isCropWithinCell(int[] crop, BoundingBox cellBbox, float dpi, float pageHeight) {
+        if (crop == null || crop[2] <= 0 || crop[3] <= 0 || cellBbox == null) {
+            return false;
+        }
+        BoundingBox cropPdf = coordinateMatcher.toPdfBox(BoundingBox.builder()
+                .x(crop[0]).y(crop[1]).width(crop[2]).height(crop[3]).build(), dpi, pageHeight);
+        float tolerancePt = dpi / 72f + 0.5f;
+        return cellBbox.expand(tolerancePt).contains(cropPdf);
     }
 
     /**

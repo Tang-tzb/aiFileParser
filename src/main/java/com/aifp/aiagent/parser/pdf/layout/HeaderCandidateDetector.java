@@ -4,6 +4,8 @@ import com.aifp.aiagent.parser.pdf.region.CoordinateMatcher;
 import com.aifp.aiagent.parser.pdf.region.RegionType;
 import com.aifp.aiagent.parser.pdf.region.VisualRegion;
 import com.aifp.aiagent.parser.pdf.text.BoundingBox;
+import com.aifp.aiagent.parser.pdf.text.TextBlock;
+import com.aifp.aiagent.parser.pdf.text.TextLine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -14,11 +16,16 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 表头候选判定器（阶段 7 v2，对应《PDF解析改造方案》§十"只对 Header Region OCR"）。
+ * 表头候选判定器（阶段 7 v2 / 阶段 8 v3，对应《PDF解析改造方案》§十"只对 Header Region OCR"）。
  * <p>
- * 表头候选<b>不得仅依据"无原生文字 + inkRatio"</b>，本判定器综合三类证据：
+ * 表头候选<b>不得仅依据"无原生文字 + inkRatio"</b>，本判定器综合四类证据：
  * <ul>
  *   <li><b>硬前置</b>：该 cell 无任何值绑定（有值的数据 Cell 永不为表头候选）；</li>
+ *   <li><b>文字层检查</b>（§十"OCR 只对缺少文字层的视觉区域进行补充"）：任一原生文字
+ *       原子单元（段/行）以<b>空间覆盖率主判定</b>（intersection/unitArea ≥
+ *       header-native-text-coverage）或<b>中心点辅助判定</b>（∈cell 且 ≥0.50）
+ *       覆盖该 cell → 存在文字层，排除；跨格单元在两格覆盖率皆低且中心仅在
+ *       所属格，不误判邻格真候选；</li>
  *   <li><b>Cell 位置先验</b>（满足其一）：①格网最左列（标签列形态）
  *       ②最顶行（表头行形态）③与某值单元格同行且紧邻其左侧；</li>
  *   <li><b>视觉文本特征</b>：墨迹占比 ∈ [label-ink-ratio, header-max-ink-ratio]——
@@ -55,6 +62,15 @@ public class HeaderCandidateDetector {
      * 印章/签名区域交集判定的外扩容差（pt，与 CoordinateMatcher 口径一致）
      */
     private static final float REGION_OVERLAP_TOLERANCE_PT = 2f;
+    /**
+     * 文字层检查的辅助判定覆盖率下限（unit 中心点 ∈ cell 时适用）。
+     * <p>
+     * 取 0.50（与 HybridTableRecognizer 段级中心点兜底同值）：主判定未达
+     * native-text-coverage、但单元过半覆盖且中心落在候选格内时，视为该格
+     * 存在文字层；跨格单元在邻格的覆盖率通常低于该值且中心不在格内，
+     * 不会因跨格单元误判真表头候选。辅助路径不开放配置，避免配置面膨胀。
+     */
+    private static final double NATIVE_TEXT_CENTER_MIN_COVERAGE = 0.50;
 
     private final CoordinateMatcher coordinateMatcher;
 
@@ -78,6 +94,15 @@ public class HeaderCandidateDetector {
      */
     @Value("${document.parser.pdf.region.stamp-red-ratio:0.10}")
     private double stampRedRatio = 0.10;
+    /**
+     * 文字层检查主判定：文字原子单元与候选格的空间覆盖率阈值
+     * （intersection/unitArea ≥ 该值 → 该格存在文字层，排除 OCR）。
+     * <p>
+     * 取 0.60（与值绑定 value-coverage-ratio 同默认值但独立配置）：语义为
+     * "文字归属该格"的项目级一致口径，独立成键避免两处消费互相牵连。
+     */
+    @Value("${document.parser.pdf.table.header-native-text-coverage:0.60}")
+    private double nativeTextCoverage = 0.60;
 
     /**
      * 行区间重叠（[rowIndex, rowIndex+rowSpan) 相交）。
@@ -112,6 +137,20 @@ public class HeaderCandidateDetector {
     }
 
     /**
+     * 文字原子单元外接框：段级优先（跨格切分后的原子，防止整行外接框
+     * 横跨多格造成误判），旧构造点未赋值 segments 时整行兜底
+     * （与 HybridTableRecognizer.piecesOf 同口径）。
+     */
+    private static List<BoundingBox> unitBoxesOf(TextLine line) {
+        if (line.getSegments() == null || line.getSegments().isEmpty()) {
+            return line.getBbox() == null ? List.of() : List.of(line.getBbox());
+        }
+        return line.getSegments().stream().map(TextLine.Segment::bbox).toList();
+    }
+
+    // ---------- 文字层检查 ----------
+
+    /**
      * 筛选表头候选单元格。
      *
      * @param cells      格网全部单元格（硬前置 = value 已绑定的单元格直接排除）
@@ -119,10 +158,12 @@ public class HeaderCandidateDetector {
      * @param dpi        渲染 DPI
      * @param pageHeight 页面高度（pt，坐标换算）
      * @param regions    视觉区域（STAMP/SIGNATURE 排除判定）
+     * @param textBlocks 原生文字块（文字层检查：有文字层的 Cell 不进表头 OCR）
      * @return 候选列表（含判定理由）
      */
     public List<HeaderCandidate> detect(List<TableCell> cells, BufferedImage image,
-                                        float dpi, float pageHeight, List<VisualRegion> regions) {
+                                        float dpi, float pageHeight, List<VisualRegion> regions,
+                                        List<TextBlock> textBlocks) {
         List<HeaderCandidate> candidates = new ArrayList<>();
         if (cells == null || cells.isEmpty() || image == null) {
             return candidates;
@@ -132,6 +173,12 @@ public class HeaderCandidateDetector {
         for (TableCell cell : cells) {
             if (cell.getValue() != null) {
                 // 硬前置：有值绑定的数据 Cell 永不为表头候选
+                continue;
+            }
+            if (hasNativeTextLayer(cell.getBoundingBox(), textBlocks)) {
+                // §十：OCR 只对缺少文字层的视觉区域进行补充
+                log.debug("表头候选排除 cell=({},{}) reason=存在原生文字层",
+                        cell.getRowIndex(), cell.getColumnIndex());
                 continue;
             }
             String position = positionPrior(cell, cells, minColumn, minRow);
@@ -153,6 +200,58 @@ public class HeaderCandidateDetector {
         }
         log.info("表头候选筛选完成 候选={}/{}", candidates.size(), cells.size());
         return candidates;
+    }
+
+    /**
+     * 是否存在原生文字层：任一文字原子单元（段/行）与该格满足覆盖率主判定
+     * 或中心点辅助判定即视为有文字层（§十——此类格有原生文字兜底，不进表头 OCR）。
+     * <p>
+     * 与值绑定形成互补闭环：能绑成值的格被 value!=null 硬前置拦截；绑定落空
+     * 但有实质文字覆盖的碎片（如跨格段多数面积落在本格）由本门拦截。
+     */
+    private boolean hasNativeTextLayer(BoundingBox cellBbox, List<TextBlock> textBlocks) {
+        if (textBlocks == null || textBlocks.isEmpty() || cellBbox == null) {
+            return false;
+        }
+        for (TextBlock block : textBlocks) {
+            for (TextLine line : block.getLines()) {
+                for (BoundingBox unitBbox : unitBoxesOf(line)) {
+                    if (coversCellText(cellBbox, unitBbox)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 单元→格文字层判定。
+     * <ul>
+     *   <li><b>主判定</b>：intersectionArea(unit, cell)/unitArea ≥
+     *       {@link #nativeTextCoverage}——覆盖率优先，直接反映文字落入该格的
+     *       面积占比；</li>
+     *   <li><b>辅助判定</b>：unit 中心点 ∈ cell 且 coverage ≥
+     *       {@link #NATIVE_TEXT_CENTER_MIN_COVERAGE}——兜文字贴边/轻微出格；</li>
+     *   <li><b>跨格防误判</b>：单元横跨两格时两格覆盖率皆低，中心仅落在
+     *       所属格——邻格主/辅判定均不触发，真表头候选不被跨格单元误排除。</li>
+     * </ul>
+     */
+    private boolean coversCellText(BoundingBox cellBbox, BoundingBox unitBbox) {
+        if (unitBbox == null || unitBbox.getWidth() * unitBbox.getHeight() <= 0) {
+            return false;
+        }
+        double unitArea = (double) unitBbox.getWidth() * unitBbox.getHeight();
+        BoundingBox inter = cellBbox.intersection(unitBbox);
+        double coverage = inter == null ? 0
+                : (double) inter.getWidth() * inter.getHeight() / unitArea;
+        if (coverage >= nativeTextCoverage) {
+            return true;
+        }
+        float centerX = unitBbox.getX() + unitBbox.getWidth() / 2f;
+        float centerY = unitBbox.getY() + unitBbox.getHeight() / 2f;
+        return cellBbox.contains(centerX, centerY)
+                && coverage >= NATIVE_TEXT_CENTER_MIN_COVERAGE;
     }
 
     // ---------- 视觉特征与排除 ----------
