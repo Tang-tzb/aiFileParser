@@ -54,12 +54,28 @@ public class FileServiceImpl implements FileService {
         return toUploadVO(record);
     }
 
+    /**
+     * 状态流转（阶段 13 状态机唯一写入口）：
+     * 同态写视为幂等 no-op；非法迁移（{@link FileStatus#canTransitionTo} 白名单外，
+     * 含终态 SUCCESS 任何出边）抛 {@code FILE_STATUS_ILLEGAL_TRANSITION} 且不落库。
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void updateStatus(Long id, FileStatus status) {
         FileRecord record = fileRecordMapper.selectById(id);
         if (record == null) {
             throw new BusinessException(ResultCode.FILE_NOT_FOUND);
+        }
+        FileStatus current = record.getStatus();
+        // 同态写幂等 no-op（如 markFailed 双写 FAILED→FAILED）
+        if (current == status) {
+            log.info("文件状态同态跳过 fileId={}, status={}", id, status);
+            return;
+        }
+        if (!current.canTransitionTo(status)) {
+            log.warn("非法文件状态流转已拒绝 fileId={}, {} → {}", id, current, status);
+            throw new BusinessException(ResultCode.FILE_STATUS_ILLEGAL_TRANSITION,
+                    "非法状态流转: " + current + " → " + status);
         }
         record.setStatus(status);
         fileRecordMapper.updateById(record);

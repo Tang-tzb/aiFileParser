@@ -7,10 +7,10 @@ import com.aifp.aiagent.entity.enums.FileStatus;
 import com.aifp.aiagent.exception.BusinessException;
 import com.aifp.aiagent.parser.FileParser;
 import com.aifp.aiagent.parser.FileParserRegistry;
-import com.aifp.aiagent.rag.DocumentChunker;
-import com.aifp.aiagent.rag.DocumentIngestionService;
-import com.aifp.aiagent.rag.ProgressCallback;
-import com.aifp.aiagent.rag.VectorStoreService;
+import com.aifp.aiagent.parser.StructuredFileParser;
+import com.aifp.aiagent.parser.pdf.ast.DocumentAst;
+import com.aifp.aiagent.parser.pdf.chunk.HybridSemanticChunker;
+import com.aifp.aiagent.rag.*;
 import com.aifp.aiagent.service.FileService;
 import com.aifp.aiagent.service.storage.FileStorageService;
 import lombok.RequiredArgsConstructor;
@@ -26,7 +26,13 @@ import java.util.List;
 /**
  * DocumentIngestionService 实现
  * <p>
- * 编排顺序：getById → PARSING → load → parse → setFileId → VECTORING → chunk → store → SUCCESS。
+ * 编排顺序：getById → PARSING → parse+chunk → VECTORING → store。
+ * 阶段 13 严格状态序列：ingest 完成停在 VECTORING（不落 SUCCESS），
+ * SUCCESS 仅由抽取阶段（FieldExtractorService）落库，
+ * 保证 UPLOADED → PARSING → VECTORING → EXTRACTING → SUCCESS / FAILED。
+ * 切片链路分派（阶段 12 链路替换）：实现 {@link StructuredFileParser} 的解析器
+ * （PDF）走 {@code DocumentAst → HybridSemanticChunker} 混合语义切片；
+ * 其余类型走全文 {@code ParserDocument → DocumentChunker} 旧滑窗切片。
  * 任一异常 → updateStatus(FAILED) 并抛出对应业务异常。
  *
  * @author Tang_tzb
@@ -41,6 +47,8 @@ public class DocumentIngestionServiceImpl implements DocumentIngestionService {
     private final FileParserRegistry fileParserRegistry;
     private final DocumentChunker documentChunker;
     private final VectorStoreService vectorStoreService;
+    private final HybridSemanticChunker hybridSemanticChunker;
+    private final ChunkVectorConverter chunkVectorConverter;
 
     @Override
     public void ingest(Long fileId) {
@@ -50,9 +58,13 @@ public class DocumentIngestionServiceImpl implements DocumentIngestionService {
     @Override
     public void ingest(Long fileId, ProgressCallback callback) {
         FileRecordVO record = fileService.getById(fileId);
-        // 幂等：已成功入库则跳过，避免重复 chunk；不触发回调（已成功任务无进度可报）
-        if (record.getStatus() == FileStatus.SUCCESS) {
-            log.info("文件已入库，跳过 fileId={}", fileId);
+        // 幂等（阶段 13）：已向量化入库即跳过——SUCCESS（全流程完成）/ VECTORING（已入库待抽取）
+        // / EXTRACTING（抽取中或崩溃滞留，chunk 已入库）。避免重复 chunk 写入 Milvus；
+        // 跳过时不触发回调（已入库任务无入库进度可报）。
+        if (record.getStatus() == FileStatus.SUCCESS
+                || record.getStatus() == FileStatus.VECTORING
+                || record.getStatus() == FileStatus.EXTRACTING) {
+            log.info("文件已入库（{}），跳过 fileId={}", record.getStatus(), fileId);
             return;
         }
         try {
@@ -67,22 +79,38 @@ public class DocumentIngestionServiceImpl implements DocumentIngestionService {
     }
 
     /**
-     * 实际入库流程：状态流转 PARSING → VECTORING → SUCCESS，阶段起始触发回调。
+     * 实际入库流程：状态流转 PARSING → VECTORING，阶段起始触发回调。
+     * 阶段 13：不落 SUCCESS——向量化完成即止，SUCCESS 由抽取阶段落库（严格状态序列）。
      */
     private void doIngest(FileRecordVO record, ProgressCallback callback) {
         Long fileId = record.getFileId();
         fileService.updateStatus(fileId, FileStatus.PARSING);
         notifyStage(callback, "PARSING");
-        ParserDocument doc = parseDocument(record);
-        // 由 IngestionService 注入 fileId，供 chunk 元数据按文件过滤
-        doc.getMetadata().setFileId(fileId);
+        List<Document> chunks = parseAndChunk(record, fileId);
 
         fileService.updateStatus(fileId, FileStatus.VECTORING);
         notifyStage(callback, "VECTORING");
-        List<Document> chunks = documentChunker.chunk(doc);
         vectorStoreService.store(chunks);
-        fileService.updateStatus(fileId, FileStatus.SUCCESS);
-        log.info("文件入库完成 fileId={}, chunks={}", fileId, chunks.size());
+        log.info("文件向量化完成 fileId={}, chunks={}", fileId, chunks.size());
+    }
+
+    /**
+     * 解析并切片（阶段 12 链路替换）：实现 {@link StructuredFileParser} 的解析器
+     * 走 {@code DocumentAst → HybridSemanticChunker → Document} 结构链路；
+     * 其余类型走全文 {@code ParserDocument → DocumentChunker} 旧滑窗链路，
+     * fileId 由本服务注入供 chunk 元数据按文件过滤。
+     */
+    private List<Document> parseAndChunk(FileRecordVO record, Long fileId) {
+        Resource resource = fileStorageService.load(record.getFilePath());
+        File file = toFile(resource, record.getFileName());
+        FileParser parser = fileParserRegistry.get(record.getFileType());
+        if (parser instanceof StructuredFileParser structured) {
+            DocumentAst ast = structured.parseStructured(file);
+            return chunkVectorConverter.convert(hybridSemanticChunker.chunk(ast, fileId));
+        }
+        ParserDocument doc = parser.parse(file);
+        doc.getMetadata().setFileId(fileId);
+        return documentChunker.chunk(doc);
     }
 
     /**
@@ -92,16 +120,6 @@ public class DocumentIngestionServiceImpl implements DocumentIngestionService {
         if (callback != null) {
             callback.onStageStart(stageCode);
         }
-    }
-
-    /**
-     * 加载文件资源并按类型解析为统一文档模型。
-     */
-    private ParserDocument parseDocument(FileRecordVO record) {
-        Resource resource = fileStorageService.load(record.getFilePath());
-        File file = toFile(resource, record.getFileName());
-        FileParser parser = fileParserRegistry.get(record.getFileType());
-        return parser.parse(file);
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.aifp.aiagent.service.impl;
 
 import com.aifp.aiagent.dto.ExtractionResult;
+import com.aifp.aiagent.dto.FileRecordVO;
 import com.aifp.aiagent.dto.FormFieldVO;
 import com.aifp.aiagent.dto.FormVO;
 import com.aifp.aiagent.entity.enums.FieldType;
@@ -71,6 +72,7 @@ class FieldExtractorServiceImplTest {
 
     @Test
     void extract_normalFlow_returnsResultNoErrors() {
+        stubFileRecord(FileStatus.UPLOADED);
         when(formService.getFormById(FORM_ID)).thenReturn(buildForm(2));
         when(vectorStoreService.search(anyString(), anyInt(), anyString()))
                 .thenReturn(List.of(new Document("项目名称为智慧校园，投资金额500万元。")));
@@ -86,6 +88,9 @@ class FieldExtractorServiceImplTest {
                 .isEqualByComparingTo(new BigDecimal("5000000"));
         verify(fileService).updateStatus(FILE_ID, FileStatus.EXTRACTING);
         verify(fileService).updateStatus(FILE_ID, FileStatus.SUCCESS);
+        // 阶段 13 固化：fileId 过滤表达式必须保持（跨文件污染防线）
+        verify(vectorStoreService, times(2))
+                .search(anyString(), anyInt(), eq("fileId == '" + FILE_ID + "'"));
     }
 
     /**
@@ -93,6 +98,7 @@ class FieldExtractorServiceImplTest {
      */
     @Test
     void extract_typeErrorThenRetry_successOnSecondAttempt() {
+        stubFileRecord(FileStatus.UPLOADED);
         when(formService.getFormById(FORM_ID)).thenReturn(buildForm(2));
         when(vectorStoreService.search(anyString(), anyInt(), anyString()))
                 .thenReturn(List.of(new Document("项目名称为智慧校园，投资金额500万元。")));
@@ -110,6 +116,7 @@ class FieldExtractorServiceImplTest {
 
     @Test
     void extract_emptyFields_throws5004() {
+        stubFileRecord(FileStatus.UPLOADED);
         when(formService.getFormById(FORM_ID)).thenReturn(buildForm(0));
 
         assertThatThrownBy(() -> extractor.extract(FORM_ID, FILE_ID))
@@ -119,6 +126,7 @@ class FieldExtractorServiceImplTest {
 
     @Test
     void extract_invalidJson_throws3002() {
+        stubFileRecord(FileStatus.UPLOADED);
         when(formService.getFormById(FORM_ID)).thenReturn(buildForm(1));
         when(vectorStoreService.search(anyString(), anyInt(), anyString()))
                 .thenReturn(List.of(new Document("片段内容")));
@@ -131,7 +139,8 @@ class FieldExtractorServiceImplTest {
     }
 
     @Test
-    void extract_noChunks_throws4002() {
+    void extract_noChunks_throws4002AndMarkFailed() {
+        stubFileRecord(FileStatus.UPLOADED);
         when(formService.getFormById(FORM_ID)).thenReturn(buildForm(1));
         when(vectorStoreService.search(anyString(), anyInt(), anyString()))
                 .thenReturn(List.of());
@@ -139,9 +148,64 @@ class FieldExtractorServiceImplTest {
         assertThatThrownBy(() -> extractor.extract(FORM_ID, FILE_ID))
                 .isInstanceOf(BusinessException.class)
                 .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo(4002));
+        // 阶段 13：检索为空失败必须落 FAILED，不得滞留 EXTRACTING
+        verify(fileService).updateStatus(FILE_ID, FileStatus.EXTRACTING);
+        verify(fileService).updateStatus(FILE_ID, FileStatus.FAILED);
+    }
+
+    /**
+     * 阶段 13：AI 调用失败必须落 FAILED 并原样传播异常（覆盖 /fill 直调路径）。
+     */
+    @Test
+    void extract_aiFailure_markFailedAndRethrow() {
+        stubFileRecord(FileStatus.UPLOADED);
+        when(formService.getFormById(FORM_ID)).thenReturn(buildForm(1));
+        when(vectorStoreService.search(anyString(), anyInt(), anyString()))
+                .thenReturn(List.of(new Document("片段内容")));
+        when(chatModel.call(any(Prompt.class)))
+                .thenReturn(chatResponse("这不是合法 JSON"));
+
+        assertThatThrownBy(() -> extractor.extract(FORM_ID, FILE_ID))
+                .isInstanceOf(BusinessException.class)
+                .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo(3002));
+
+        verify(fileService).updateStatus(FILE_ID, FileStatus.EXTRACTING);
+        verify(fileService).updateStatus(FILE_ID, FileStatus.FAILED);
+        verify(fileService, never()).updateStatus(FILE_ID, FileStatus.SUCCESS);
+    }
+
+    /**
+     * 阶段 13 终态封闭：SUCCESS 文件重新抽取（换表单）合法，但状态零写入——
+     * 不产生 SUCCESS → EXTRACTING / SUCCESS → SUCCESS 非法跳转；结果正常返回。
+     */
+    @Test
+    void extract_alreadySuccess_skipsStatusWrites() {
+        stubFileRecord(FileStatus.SUCCESS);
+        when(formService.getFormById(FORM_ID)).thenReturn(buildForm(1));
+        when(vectorStoreService.search(anyString(), anyInt(), anyString()))
+                .thenReturn(List.of(new Document("项目名称为智慧校园")));
+        when(chatModel.call(any(Prompt.class)))
+                .thenReturn(chatResponse("{\"projectName\":\"智慧校园\"}"));
+
+        ExtractionResult result = extractor.extract(FORM_ID, FILE_ID);
+
+        assertThat(result.getErrors()).isEmpty();
+        assertThat(result.getValues()).containsEntry("projectName", "智慧校园");
+        verify(fileService, never()).updateStatus(eq(FILE_ID), any());
     }
 
     // ==================== 测试数据 ====================
+
+    /**
+     * 桩：extract 内 SUCCESS 预检读取文件状态。
+     */
+    private void stubFileRecord(FileStatus status) {
+        FileRecordVO vo = new FileRecordVO();
+        vo.setFileId(FILE_ID);
+        vo.setFileName("项目申报书.pdf");
+        vo.setStatus(status);
+        when(fileService.getById(FILE_ID)).thenReturn(vo);
+    }
 
     private ChatResponse chatResponse(String content) {
         return new ChatResponse(List.of(new Generation(new AssistantMessage(content))));

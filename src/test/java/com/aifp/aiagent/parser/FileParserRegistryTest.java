@@ -18,8 +18,11 @@ class FileParserRegistryTest {
 
     private final FileParserRegistry registry =
             new FileParserRegistry(List.of(
+                    // 结构链路依赖以 mock 占位（本测试仅验证策略选择）
                     new PdfParser(new com.aifp.aiagent.parser.pdf.text.DefaultPdfTextExtractor(
-                            new com.aifp.aiagent.parser.pdf.text.PdfCoordinateConverter())),
+                            new com.aifp.aiagent.parser.pdf.text.PdfCoordinateConverter()),
+                            org.mockito.Mockito.mock(com.aifp.aiagent.parser.pdf.DocumentParser.class),
+                            org.mockito.Mockito.mock(com.aifp.aiagent.parser.pdf.clean.DocumentCleaner.class)),
                     new ExcelParser(), new WordParser()));
 
     @Test

@@ -32,9 +32,13 @@ import java.util.Map;
 /**
  * FieldExtractorService 实现
  * <p>
- * 流程：ingest(幂等) → 读字段 → EXTRACTING → 按字段检索+合并去重 chunks →
+ * 流程：ingest(幂等) → SUCCESS 预检 → EXTRACTING → 按字段检索+合并去重 chunks →
  * 动态 Prompt → ChatModel 调用 → JSON 解析 → Schema 校验+智能类型转换 →
  * 失败按字段错误反馈 Retry → {@link ExtractionResult} → SUCCESS。
+ * <p>
+ * 阶段 13 状态机合规：SUCCESS 为终态——已成功文件重新抽取合法但不写状态
+ * （不产生 SUCCESS → EXTRACTING 倒退）；抽取失败经 markFailed 落 FAILED，
+ * 覆盖异步任务与 /fill 直调两条路径。
  *
  * @author Tang_tzb
  */
@@ -64,10 +68,34 @@ public class FieldExtractorServiceImpl implements FieldExtractorService {
 
     @Override
     public ExtractionResult extract(Long formId, Long fileId) {
-        // 幂等：确保文档已入 Milvus
+        // 幂等：确保文档已入 Milvus（已入库则跳过）
         ingestionService.ingest(fileId);
+        // 阶段 13 状态机适配：SUCCESS 为终态不可逆。换表单重新抽取合法，
+        // 但跳过 EXTRACTING/SUCCESS 状态写，避免 SUCCESS → EXTRACTING 非法跳转。
+        boolean alreadySuccess = fileService.getById(fileId).getStatus() == FileStatus.SUCCESS;
+        try {
+            ExtractionResult result = doExtract(formId, fileId, alreadySuccess);
+            log.info("字段抽取完成 formId={}, fileId={}, attempts={}, errors={}",
+                    formId, fileId, result.getAttemptsUsed(), result.getErrors().size());
+            return result;
+        } catch (Exception e) {
+            // 阶段 13：抽取失败（AI 调用/检索为空/Retry 耗尽）落 FAILED，
+            // 异常原样重抛保持对外契约不变；SUCCESS 文件重抽取失败不改状态。
+            markFailed(fileId, alreadySuccess);
+            throw e;
+        }
+    }
+
+    /**
+     * 实际抽取流程：EXTRACTING → 检索合并 → Retry 循环 → SUCCESS。
+     *
+     * @param skipStatusWrites SUCCESS 终态文件重抽取时跳过状态写
+     */
+    private ExtractionResult doExtract(Long formId, Long fileId, boolean skipStatusWrites) {
         List<FormFieldVO> fields = loadFields(formId);
-        fileService.updateStatus(fileId, FileStatus.EXTRACTING);
+        if (!skipStatusWrites) {
+            fileService.updateStatus(fileId, FileStatus.EXTRACTING);
+        }
 
         // 按字段检索 + 合并去重（带 fileId 过滤避免跨文件污染）
         String filter = "fileId == '" + fileId + "'";
@@ -78,10 +106,25 @@ public class FieldExtractorServiceImpl implements FieldExtractorService {
 
         // Retry 循环：LLM 调用 → JSON 解析 → Schema 校验 → 失败反馈重试
         ExtractionResult result = extractWithRetry(fields, chunks);
-        fileService.updateStatus(fileId, FileStatus.SUCCESS);
-        log.info("字段抽取完成 formId={}, fileId={}, attempts={}, errors={}",
-                formId, fileId, result.getAttemptsUsed(), result.getErrors().size());
+        if (!skipStatusWrites) {
+            fileService.updateStatus(fileId, FileStatus.SUCCESS);
+        }
         return result;
+    }
+
+    /**
+     * 标记文件为失败状态，吞掉二次异常避免覆盖原始异常；
+     * SUCCESS 终态文件重抽取失败保持 SUCCESS（终态封闭），不落 FAILED。
+     */
+    private void markFailed(Long fileId, boolean alreadySuccess) {
+        if (alreadySuccess) {
+            return;
+        }
+        try {
+            fileService.updateStatus(fileId, FileStatus.FAILED);
+        } catch (Exception ex) {
+            log.warn("标记失败状态异常 fileId={}", fileId, ex);
+        }
     }
 
     /**

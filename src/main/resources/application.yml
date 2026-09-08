@@ -275,3 +275,9 @@ document:
       markdown:
         # 键值清单渲染开关：开启时每页 nodes 后追加“字段：值”（关闭则严格遵循阶段 9 契约）
         key-values-enabled: ${PDF_MARKDOWN_KEY_VALUES:true}
+      # 混合语义切片参数（阶段 12：parser/pdf/chunk，仅 PDF 结构链路；非 PDF 仍走 rag.chunk.*）
+      chunk:
+        # 单块 token 预算（cl100k_base 近似计数，与旧滑窗口径一致）
+        size: ${PDF_CHUNK_SIZE:800}
+        # 仅 Sentence→Token 窗口降级层生效的块间重叠 token
+        overlap: ${PDF_CHUNK_OVERLAP:200}

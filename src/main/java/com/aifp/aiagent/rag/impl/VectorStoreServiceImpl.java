@@ -26,6 +26,12 @@ public class VectorStoreServiceImpl implements VectorStoreService {
 
     @Override
     public void store(List<Document> chunks) {
+        // 阶段 13 空切片防御：空解析文档 0 块入库直接跳过（Milvus 空插入行为不确定）；
+        // 链路闭环由抽取阶段"未检索到相关文档切片"→ FAILED 兜底
+        if (chunks == null || chunks.isEmpty()) {
+            log.warn("空切片列表，跳过向量入库");
+            return;
+        }
         try {
             vectorStore.add(chunks);
             log.info("向量入库完成 chunks={}", chunks.size());
