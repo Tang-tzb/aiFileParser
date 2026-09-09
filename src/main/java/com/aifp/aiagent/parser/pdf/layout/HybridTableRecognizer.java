@@ -12,6 +12,7 @@ import com.aifp.aiagent.parser.pdf.text.TextLine;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Primary;
 import org.springframework.stereotype.Component;
 
 import javax.imageio.ImageIO;
@@ -38,10 +39,15 @@ import java.util.stream.Collectors;
  *   <li>整网格价值判定：≥1 个值单元格才输出 TableGrid。</li>
  * </ul>
  * 异常约定：recognize 全异常封闭（降级空列表，不中断解析）。
+ * <p>
+ * {@code @Primary}：按类型注入 {@link TableStructureRecognizer} 时的生产默认——
+ * 本类是 {@link ImageTableRecognizer}/{@link CoordinateTableRecognizer} 的组合编排器，
+ * MixedPageParser 等消费者的唯一注入目标（消除三实现歧义）。
  *
  * @author Tang_tzb
  */
 @Slf4j
+@Primary
 @Component
 @RequiredArgsConstructor
 public class HybridTableRecognizer implements TableStructureRecognizer {
