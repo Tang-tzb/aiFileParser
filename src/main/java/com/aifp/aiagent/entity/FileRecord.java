@@ -35,6 +35,11 @@ public class FileRecord extends BaseEntity {
     private String filePath;
 
     /**
+     * 所属项目ID（可空：历史数据与未关联项目的文件为 null；一个文件至多归属一个项目）
+     */
+    private Long projectId;
+
+    /**
      * 处理状态
      */
     private FileStatus status;

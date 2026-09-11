@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS file_record
 (
     20
 ) NOT NULL DEFAULT 'UPLOADED' COMMENT '状态:UPLOADED/PARSING/VECTORING/EXTRACTING/SUCCESS/FAILED',
+    project_id BIGINT DEFAULT NULL COMMENT '所属项目ID(可空,历史数据兼容)',
     create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
     update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
     deleted TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除:0正常 1删除',
@@ -177,5 +178,17 @@ CREATE TABLE IF NOT EXISTS file_record
     KEY idx_file_type
 (
     file_type
+),
+    KEY idx_file_project
+(
+    project_id
 )
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='文件记录表';
+
+-- ============================================================
+-- 项目模块（Phase 2）：已有库升级（仅执行一次，重复执行报 Duplicate column）
+-- 上方 CREATE TABLE IF NOT EXISTS 对新库已包含 project_id 列；
+-- 已有库请手动放开以下两条语句执行：
+-- ============================================================
+-- ALTER TABLE file_record ADD COLUMN project_id BIGINT DEFAULT NULL COMMENT '所属项目ID(可空,历史数据兼容)';
+-- ALTER TABLE file_record ADD KEY idx_file_project (project_id);

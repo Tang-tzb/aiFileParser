@@ -10,7 +10,9 @@ import com.aifp.aiagent.entity.enums.FileStatus;
 import com.aifp.aiagent.entity.enums.FileType;
 import com.aifp.aiagent.exception.BusinessException;
 import com.aifp.aiagent.repository.FileRecordMapper;
+import com.aifp.aiagent.repository.ProjectMapper;
 import com.aifp.aiagent.service.FileService;
+import com.aifp.aiagent.service.ProjectAccessService;
 import com.aifp.aiagent.service.storage.FileStorageService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
@@ -34,10 +36,12 @@ public class FileServiceImpl implements FileService {
 
     private final FileRecordMapper fileRecordMapper;
     private final FileStorageService fileStorageService;
+    private final ProjectMapper projectMapper;
+    private final ProjectAccessService projectAccessService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public FileUploadVO upload(MultipartFile file) {
+    public FileUploadVO upload(MultipartFile file, Long projectId) {
         validateNotEmpty(file);
         FileType fileType = resolveType(file);
 
@@ -48,9 +52,15 @@ public class FileServiceImpl implements FileService {
         record.setFileType(fileType);
         record.setFilePath(filePath);
         record.setStatus(FileStatus.UPLOADED);
+        // 上传即归属项目：projectId 非空时校验可访问且存在；null 保持历史行为
+        if (projectId != null) {
+            ensureProjectUsable(projectId);
+            record.setProjectId(projectId);
+        }
         fileRecordMapper.insert(record);
 
-        log.info("文件上传成功 fileId={}, name={}, type={}", record.getId(), record.getFileName(), fileType);
+        log.info("文件上传成功 fileId={}, name={}, type={}, projectId={}",
+                record.getId(), record.getFileName(), fileType, record.getProjectId());
         return toUploadVO(record);
     }
 
@@ -107,7 +117,78 @@ public class FileServiceImpl implements FileService {
                 result.getCurrent(), result.getSize(), records);
     }
 
+    @Override
+    public PageResult<FileRecordVO> pageByProject(Long projectId, PageQuery query) {
+        // 项目文件分页：project_id 精确过滤，按创建时间倒序
+        Page<FileRecord> page = new Page<>(query.getPageNum(), query.getPageSize());
+        LambdaQueryWrapper<FileRecord> wrapper = new LambdaQueryWrapper<FileRecord>()
+                .eq(FileRecord::getProjectId, projectId)
+                .orderByDesc(FileRecord::getCreateTime);
+        Page<FileRecord> result = fileRecordMapper.selectPage(page, wrapper);
+        List<FileRecordVO> records = result.getRecords().stream()
+                .map(this::toRecordVO)
+                .toList();
+        return PageResult.of(result.getTotal(), result.getPages(),
+                result.getCurrent(), result.getSize(), records);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void associateToProject(Long projectId, Long fileId) {
+        FileRecord record = requireFile(fileId);
+        Long current = record.getProjectId();
+        // 已归属本项目：幂等 no-op；已归属其他项目：拒绝
+        if (projectId.equals(current)) {
+            log.info("文件已归属项目，幂等跳过 fileId={}, projectId={}", fileId, projectId);
+            return;
+        }
+        if (current != null) {
+            throw new BusinessException(ResultCode.PROJECT_FILE_ALREADY_BOUND,
+                    "文件已关联其他项目: " + current);
+        }
+        record.setProjectId(projectId);
+        fileRecordMapper.updateById(record);
+        log.info("文件关联项目成功 fileId={}, projectId={}", fileId, projectId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void dissociateFromProject(Long projectId, Long fileId) {
+        FileRecord record = requireFile(fileId);
+        // 未归属该项目（null 或其他项目）：拒绝；匹配则置空
+        if (!projectId.equals(record.getProjectId())) {
+            throw new BusinessException(ResultCode.PROJECT_FILE_NOT_IN_PROJECT,
+                    "文件未关联该项目 fileId=" + fileId + ", projectId=" + projectId);
+        }
+        record.setProjectId(null);
+        fileRecordMapper.updateById(record);
+        log.info("文件解除项目关联成功 fileId={}, projectId={}", fileId, projectId);
+    }
+
     // ==================== 内部方法 ====================
+
+    /**
+     * 上传/关联场景的项目可用性校验：权限 + 存在性
+     */
+    private void ensureProjectUsable(Long projectId) {
+        if (!projectAccessService.canAccess(projectId)) {
+            throw new BusinessException(ResultCode.FORBIDDEN);
+        }
+        if (projectMapper.selectById(projectId) == null) {
+            throw new BusinessException(ResultCode.PROJECT_NOT_FOUND);
+        }
+    }
+
+    /**
+     * 加载文件记录，不存在抛 FILE_NOT_FOUND(2004)
+     */
+    private FileRecord requireFile(Long fileId) {
+        FileRecord record = fileRecordMapper.selectById(fileId);
+        if (record == null) {
+            throw new BusinessException(ResultCode.FILE_NOT_FOUND);
+        }
+        return record;
+    }
 
     private void validateNotEmpty(MultipartFile file) {
         if (file == null || file.isEmpty()) {
@@ -143,6 +224,7 @@ public class FileServiceImpl implements FileService {
         vo.setFileName(r.getFileName());
         vo.setFileType(r.getFileType());
         vo.setFilePath(r.getFilePath());
+        vo.setProjectId(r.getProjectId());
         vo.setStatus(r.getStatus());
         vo.setCreateTime(r.getCreateTime());
         return vo;
@@ -154,6 +236,7 @@ public class FileServiceImpl implements FileService {
         vo.setFileName(r.getFileName());
         vo.setFileType(r.getFileType());
         vo.setFilePath(r.getFilePath());
+        vo.setProjectId(r.getProjectId());
         vo.setStatus(r.getStatus());
         vo.setCreateTime(r.getCreateTime());
         vo.setUpdateTime(r.getUpdateTime());

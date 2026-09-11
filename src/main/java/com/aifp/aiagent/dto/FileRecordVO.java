@@ -25,6 +25,12 @@ public class FileRecordVO implements Serializable {
     private String fileName;
     private FileType fileType;
     private String filePath;
+
+    /**
+     * 所属项目ID（可空，序列化为字符串避免前端 JS 精度丢失）
+     */
+    @JsonSerialize(using = ToStringSerializer.class)
+    private Long projectId;
     private FileStatus status;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;

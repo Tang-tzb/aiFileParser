@@ -15,9 +15,10 @@ public interface ParseTaskService {
     /**
      * 启动异步解析任务。
      *
-     * @param formId 表单 ID（决定 AI 抽取字段）
-     * @param fileId 文件记录 ID（已上传）
+     * @param projectId 项目ID（可选：传入时校验文件已归属该项目；null 走历史行为）
+     * @param formId    表单 ID（决定 AI 抽取字段）
+     * @param fileId    文件记录 ID（已上传）
      * @return 任务启动结果，含 taskId
      */
-    TaskStartVO start(Long formId, Long fileId);
+    TaskStartVO start(Long projectId, Long formId, Long fileId);
 }

@@ -66,4 +66,33 @@ public class ProjectController {
         projectService.deleteProject(id);
         return Result.success();
     }
+
+    /**
+     * 分页查询项目下的文件（按上传时间倒序）
+     */
+    @GetMapping("/{id}/files")
+    public Result<PageResult<FileRecordVO>> files(@PathVariable Long id,
+                                                  @Valid PageQuery query) {
+        return Result.success(projectService.listProjectFiles(id, query));
+    }
+
+    /**
+     * 将文件关联到项目（一个文件至多归属一个项目；重复关联本项目幂等）
+     */
+    @PostMapping("/{id}/file/{fileId}")
+    public Result<Void> associateFile(@PathVariable Long id,
+                                      @PathVariable Long fileId) {
+        projectService.associateFile(id, fileId);
+        return Result.success();
+    }
+
+    /**
+     * 解除文件与项目的关联（文件须当前归属该项目）
+     */
+    @DeleteMapping("/{id}/file/{fileId}")
+    public Result<Void> dissociateFile(@PathVariable Long id,
+                                       @PathVariable Long fileId) {
+        projectService.dissociateFile(id, fileId);
+        return Result.success();
+    }
 }

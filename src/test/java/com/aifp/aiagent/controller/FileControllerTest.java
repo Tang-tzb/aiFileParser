@@ -79,7 +79,7 @@ class FileControllerTest {
         MockMultipartFile file = new MockMultipartFile(
                 "file", "项目申报书.pdf", MediaType.APPLICATION_PDF_VALUE, "fake-pdf".getBytes());
 
-        when(fileService.upload(any(MultipartFile.class))).thenReturn(buildVO(FileType.PDF, "项目申报书.pdf"));
+        when(fileService.upload(any(MultipartFile.class), any())).thenReturn(buildVO(FileType.PDF, "项目申报书.pdf"));
 
         mockMvc.perform(multipart("/file/upload").file(file))
                 .andDo(print())
@@ -90,7 +90,7 @@ class FileControllerTest {
                 .andExpect(jsonPath("$.data.fileType").value("PDF"))
                 .andExpect(jsonPath("$.data.status").value("UPLOADED"));
 
-        verify(fileService).upload(any(MultipartFile.class));
+        verify(fileService).upload(any(MultipartFile.class), any());
     }
 
     /**
@@ -103,7 +103,7 @@ class FileControllerTest {
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "fake-xlsx".getBytes());
 
-        when(fileService.upload(any(MultipartFile.class))).thenReturn(buildVO(FileType.EXCEL, "data.xlsx"));
+        when(fileService.upload(any(MultipartFile.class), any())).thenReturn(buildVO(FileType.EXCEL, "data.xlsx"));
 
         mockMvc.perform(multipart("/file/upload").file(file))
                 .andExpect(status().isOk())
@@ -111,7 +111,7 @@ class FileControllerTest {
                 .andExpect(jsonPath("$.data.fileType").value("EXCEL"))
                 .andExpect(jsonPath("$.data.filePath").exists());
 
-        verify(fileService).upload(any(MultipartFile.class));
+        verify(fileService).upload(any(MultipartFile.class), any());
     }
 
     /**
@@ -124,7 +124,7 @@ class FileControllerTest {
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 "fake-docx".getBytes());
 
-        when(fileService.upload(any(MultipartFile.class))).thenReturn(buildVO(FileType.WORD, "report.docx"));
+        when(fileService.upload(any(MultipartFile.class), any())).thenReturn(buildVO(FileType.WORD, "report.docx"));
 
         mockMvc.perform(multipart("/file/upload").file(file))
                 .andExpect(status().isOk())
@@ -132,7 +132,7 @@ class FileControllerTest {
                 .andExpect(jsonPath("$.data.fileType").value("WORD"))
                 .andExpect(jsonPath("$.data.fileName").value("report.docx"));
 
-        verify(fileService).upload(any(MultipartFile.class));
+        verify(fileService).upload(any(MultipartFile.class), any());
     }
 
     // ==================== 异常路径 ====================
@@ -145,7 +145,7 @@ class FileControllerTest {
         MockMultipartFile file = new MockMultipartFile(
                 "file", "notes.txt", MediaType.TEXT_PLAIN_VALUE, "hello".getBytes());
 
-        when(fileService.upload(any(MultipartFile.class)))
+        when(fileService.upload(any(MultipartFile.class), any()))
                 .thenThrow(new BusinessException(ResultCode.FILE_TYPE_NOT_SUPPORT, "不支持的文件类型: txt"));
 
         mockMvc.perform(multipart("/file/upload").file(file))
@@ -153,7 +153,7 @@ class FileControllerTest {
                 .andExpect(jsonPath("$.code").value(2002))
                 .andExpect(jsonPath("$.message").exists());
 
-        verify(fileService).upload(any(MultipartFile.class));
+        verify(fileService).upload(any(MultipartFile.class), any());
     }
 
     /**
@@ -164,7 +164,7 @@ class FileControllerTest {
         MockMultipartFile file = new MockMultipartFile(
                 "file", "empty.pdf", MediaType.APPLICATION_PDF_VALUE, new byte[0]);
 
-        when(fileService.upload(any(MultipartFile.class)))
+        when(fileService.upload(any(MultipartFile.class), any()))
                 .thenThrow(new BusinessException(ResultCode.FILE_UPLOAD_ERROR, "上传文件为空"));
 
         mockMvc.perform(multipart("/file/upload").file(file))
@@ -172,10 +172,31 @@ class FileControllerTest {
                 .andExpect(jsonPath("$.code").value(2003))
                 .andExpect(jsonPath("$.message").exists());
 
-        verify(fileService).upload(any(MultipartFile.class));
+        verify(fileService).upload(any(MultipartFile.class), any());
     }
 
     // ==================== 测试数据构造 ====================
+
+    /**
+     * 上传带 projectId → 200，service 收到 projectId 参数
+     */
+    @Test
+    void uploadWithProjectId_shouldPassProjectId() throws Exception {
+        MockMultipartFile file = new MockMultipartFile(
+                "file", "项目申报书.pdf", MediaType.APPLICATION_PDF_VALUE, "fake-pdf".getBytes());
+
+        when(fileService.upload(any(MultipartFile.class), eq(null)))
+                .thenReturn(buildVO(FileType.PDF, "项目申报书.pdf"));
+
+        mockMvc.perform(multipart("/file/upload").file(file)
+                        .param("projectId", String.valueOf(null)))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.projectId").value(String.valueOf(null)));
+
+        verify(fileService).upload(any(MultipartFile.class), eq(null));
+    }
 
     private FileUploadVO buildVO(FileType type, String fileName) {
         FileUploadVO vo = new FileUploadVO();

@@ -2,6 +2,8 @@ package com.aifp.aiagent.controller;
 
 import com.aifp.aiagent.common.ResultCode;
 import com.aifp.aiagent.dto.*;
+import com.aifp.aiagent.entity.enums.FileStatus;
+import com.aifp.aiagent.entity.enums.FileType;
 import com.aifp.aiagent.entity.enums.ProjectStatus;
 import com.aifp.aiagent.exception.BusinessException;
 import com.aifp.aiagent.exception.GlobalExceptionHandler;
@@ -44,6 +46,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class ProjectControllerTest {
 
     private static final Long PROJECT_ID = 1785900001L;
+    private static final Long FILE_ID = 1785800001L;
     private final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
     private MockMvc mockMvc;
     @Mock
@@ -292,7 +295,115 @@ class ProjectControllerTest {
                 .andExpect(jsonPath("$.message").value("项目不存在"));
     }
 
+    // ==================== 项目文件关联（Phase 2） ====================
+
+    /**
+     * 项目文件分页 → 200，records 含项目归属文件
+     */
+    @Test
+    void files_success_returnsPageRecords() throws Exception {
+        PageResult<FileRecordVO> pr = PageResult.of(
+                1L, 1L, 1L, 10L, List.of(fileVO()));
+
+        when(projectService.listProjectFiles(eq(PROJECT_ID), any(PageQuery.class))).thenReturn(pr);
+
+        mockMvc.perform(get("/project/{id}/files", PROJECT_ID)
+                        .param("pageNum", "1")
+                        .param("pageSize", "10"))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.total").value(1))
+                .andExpect(jsonPath("$.data.records[0].fileName").value("项目申报书.pdf"))
+                .andExpect(jsonPath("$.data.records[0].projectId").value(String.valueOf(PROJECT_ID)));
+
+        verify(projectService).listProjectFiles(eq(PROJECT_ID), any(PageQuery.class));
+    }
+
+    /**
+     * 项目文件分页：项目不存在 → 6001
+     */
+    @Test
+    void files_projectNotFound_returns6001() throws Exception {
+        when(projectService.listProjectFiles(eq(9999L), any(PageQuery.class)))
+                .thenThrow(new BusinessException(ResultCode.PROJECT_NOT_FOUND));
+
+        mockMvc.perform(get("/project/{id}/files", 9999L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(6001))
+                .andExpect(jsonPath("$.message").value("项目不存在"));
+    }
+
+    /**
+     * 关联文件 → 200
+     */
+    @Test
+    void associateFile_success_returns200() throws Exception {
+        mockMvc.perform(post("/project/{id}/file/{fileId}", PROJECT_ID, FILE_ID))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data").doesNotExist());
+
+        verify(projectService).associateFile(PROJECT_ID, FILE_ID);
+    }
+
+    /**
+     * 关联文件：已归属其他项目 → 6003
+     */
+    @Test
+    void associateFile_boundToOther_returns6003() throws Exception {
+        doThrow(new BusinessException(ResultCode.PROJECT_FILE_ALREADY_BOUND))
+                .when(projectService).associateFile(PROJECT_ID, FILE_ID);
+
+        mockMvc.perform(post("/project/{id}/file/{fileId}", PROJECT_ID, FILE_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(6003))
+                .andExpect(jsonPath("$.message").value("文件已关联其他项目"));
+    }
+
+    /**
+     * 解除关联 → 200
+     */
+    @Test
+    void dissociateFile_success_returns200() throws Exception {
+        mockMvc.perform(delete("/project/{id}/file/{fileId}", PROJECT_ID, FILE_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200));
+
+        verify(projectService).dissociateFile(PROJECT_ID, FILE_ID);
+    }
+
+    /**
+     * 解除关联：文件未归属该项目 → 6004
+     */
+    @Test
+    void dissociateFile_notBound_returns6004() throws Exception {
+        doThrow(new BusinessException(ResultCode.PROJECT_FILE_NOT_IN_PROJECT))
+                .when(projectService).dissociateFile(PROJECT_ID, FILE_ID);
+
+        mockMvc.perform(delete("/project/{id}/file/{fileId}", PROJECT_ID, FILE_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(6004))
+                .andExpect(jsonPath("$.message").value("文件不属于该项目"));
+    }
+
     // ==================== 测试数据构造 ====================
+
+    /**
+     * 项目归属文件 VO：仅文件元数据 + projectId
+     */
+    private FileRecordVO fileVO() {
+        FileRecordVO vo = new FileRecordVO();
+        vo.setFileId(FILE_ID);
+        vo.setFileName("项目申报书.pdf");
+        vo.setFileType(FileType.PDF);
+        vo.setProjectId(PROJECT_ID);
+        vo.setStatus(FileStatus.UPLOADED);
+        vo.setCreateTime(LocalDateTime.now());
+        vo.setUpdateTime(LocalDateTime.now());
+        return vo;
+    }
 
     private ProjectCreateDTO validCreateDTO() {
         ProjectCreateDTO dto = new ProjectCreateDTO();

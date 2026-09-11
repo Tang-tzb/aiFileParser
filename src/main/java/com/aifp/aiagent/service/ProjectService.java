@@ -52,4 +52,29 @@ public interface ProjectService {
      * @param id 项目ID
      */
     void deleteProject(Long id);
+
+    /**
+     * 分页查询项目下的文件（项目可访问且存在才允许查询）。
+     *
+     * @param projectId 项目ID
+     * @param query     分页参数
+     * @return 项目文件分页结果
+     */
+    PageResult<FileRecordVO> listProjectFiles(Long projectId, PageQuery query);
+
+    /**
+     * 将文件关联到项目（一个文件至多归属一个项目；重复关联本项目幂等）。
+     *
+     * @param projectId 项目ID
+     * @param fileId    文件记录ID
+     */
+    void associateFile(Long projectId, Long fileId);
+
+    /**
+     * 解除文件与项目的关联（文件须当前归属该项目）。
+     *
+     * @param projectId 项目ID
+     * @param fileId    文件记录ID
+     */
+    void dissociateFile(Long projectId, Long fileId);
 }

@@ -30,4 +30,10 @@ public class TaskStartRequest implements Serializable {
      */
     @NotNull(message = "文件ID不能为空")
     private Long fileId;
+
+    /**
+     * 项目ID（可选）：传入时校验文件已归属该项目；
+     * 为 null 保持旧 API 行为（历史调用兼容，Phase 4 抽取链路再反查归属）。
+     */
+    private Long projectId;
 }

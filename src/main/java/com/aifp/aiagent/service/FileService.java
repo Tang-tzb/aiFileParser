@@ -19,11 +19,15 @@ public interface FileService {
 
     /**
      * 上传文件：保存到存储 + 写入 file_record（状态 UPLOADED）。
+     * <p>
+     * {@code projectId} 非空时校验项目可访问且存在，上传即归属项目；
+     * 为 null 时保持历史行为（未关联项目）。
      *
-     * @param file 上传文件
+     * @param file      上传文件
+     * @param projectId 所属项目ID（可选）
      * @return 上传结果 VO
      */
-    FileUploadVO upload(MultipartFile file);
+    FileUploadVO upload(MultipartFile file, Long projectId);
 
     /**
      * 更新文件处理状态（供解析流水线流转）。
@@ -48,4 +52,33 @@ public interface FileService {
      * @return 分页结果（每条为 FileRecordVO，含全部字段）
      */
     PageResult<FileRecordVO> page(PageQuery query);
+
+    /**
+     * 分页查询指定项目下的文件（按 createTime DESC）。
+     *
+     * @param projectId 项目ID（存在性/权限由调用方项目域校验）
+     * @param query     分页参数
+     * @return 分页结果
+     */
+    PageResult<FileRecordVO> pageByProject(Long projectId, PageQuery query);
+
+    /**
+     * 将文件关联到项目（一个文件至多归属一个项目）。
+     * <p>
+     * 文件已归属本项目视为幂等 no-op；已归属其他项目抛 6003。
+     *
+     * @param projectId 项目ID
+     * @param fileId    文件记录ID
+     */
+    void associateToProject(Long projectId, Long fileId);
+
+    /**
+     * 解除文件与项目的关联（project_id 置空，不删除文件）。
+     * <p>
+     * 文件未归属该项目（null 或其他项目）抛 6004。
+     *
+     * @param projectId 项目ID
+     * @param fileId    文件记录ID
+     */
+    void dissociateFromProject(Long projectId, Long fileId);
 }

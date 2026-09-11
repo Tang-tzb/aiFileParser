@@ -36,18 +36,21 @@ import static org.mockito.Mockito.*;
 class ProjectServiceImplTest {
 
     private static final Long PROJECT_ID = 1785900001L;
+    private static final Long FILE_ID = 1785800001L;
     private static final String PROJECT_NO = "PRJ-001";
 
     @Mock
     private ProjectMapper projectMapper;
     @Mock
     private ProjectAccessService projectAccessService;
+    @Mock
+    private com.aifp.aiagent.service.FileService fileService;
 
     private ProjectServiceImpl projectService;
 
     @BeforeEach
     void setUp() {
-        projectService = new ProjectServiceImpl(projectMapper, projectAccessService);
+        projectService = new ProjectServiceImpl(projectMapper, projectAccessService, fileService);
     }
 
     // ==================== createProject ====================
@@ -231,6 +234,77 @@ class ProjectServiceImplTest {
         assertThat(result.getTotal()).isEqualTo(2L);
         assertThat(result.getRecords()).hasSize(2);
         assertThat(result.getRecords().get(0).getProjectNo()).isEqualTo(PROJECT_NO);
+    }
+
+    // ==================== 项目文件关联编排（Phase 2） ====================
+
+    /**
+     * 项目文件分页：权限+存在校验通过后委托 FileService.pageByProject
+     */
+    @Test
+    void listProjectFiles_guardsProject_thenDelegates() {
+        when(projectAccessService.canAccess(PROJECT_ID)).thenReturn(true);
+        when(projectMapper.selectById(PROJECT_ID)).thenReturn(sampleProject());
+
+        PageQuery query = new PageQuery();
+        projectService.listProjectFiles(PROJECT_ID, query);
+
+        verify(fileService).pageByProject(PROJECT_ID, query);
+    }
+
+    /**
+     * 项目文件分页：项目不存在 → 6001，不触碰 FileService
+     */
+    @Test
+    void listProjectFiles_projectNotFound_throwsWithoutDelegation() {
+        when(projectAccessService.canAccess(PROJECT_ID)).thenReturn(true);
+        when(projectMapper.selectById(PROJECT_ID)).thenReturn(null);
+
+        assertThatThrownBy(() -> projectService.listProjectFiles(PROJECT_ID, new PageQuery()))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.PROJECT_NOT_FOUND.getCode()));
+
+        verifyNoInteractions(fileService);
+    }
+
+    /**
+     * 关联文件：权限拒绝 → FORBIDDEN，不触碰 FileService
+     */
+    @Test
+    void associateFile_accessDenied_throwsWithoutDelegation() {
+        when(projectAccessService.canAccess(PROJECT_ID)).thenReturn(false);
+
+        assertThatThrownBy(() -> projectService.associateFile(PROJECT_ID, FILE_ID))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.FORBIDDEN.getCode()));
+
+        verifyNoInteractions(fileService);
+    }
+
+    /**
+     * 关联文件：项目守门通过后委托 FileService.associateToProject
+     */
+    @Test
+    void associateFile_guardsProject_thenDelegates() {
+        when(projectAccessService.canAccess(PROJECT_ID)).thenReturn(true);
+        when(projectMapper.selectById(PROJECT_ID)).thenReturn(sampleProject());
+
+        projectService.associateFile(PROJECT_ID, FILE_ID);
+
+        verify(fileService).associateToProject(PROJECT_ID, FILE_ID);
+    }
+
+    /**
+     * 解除关联：项目守门通过后委托 FileService.dissociateFromProject
+     */
+    @Test
+    void dissociateFile_guardsProject_thenDelegates() {
+        when(projectAccessService.canAccess(PROJECT_ID)).thenReturn(true);
+        when(projectMapper.selectById(PROJECT_ID)).thenReturn(sampleProject());
+
+        projectService.dissociateFile(PROJECT_ID, FILE_ID);
+
+        verify(fileService).dissociateFromProject(PROJECT_ID, FILE_ID);
     }
 
     // ==================== 测试辅助 ====================

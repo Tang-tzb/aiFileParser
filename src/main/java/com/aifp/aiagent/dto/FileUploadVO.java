@@ -29,6 +29,12 @@ public class FileUploadVO implements Serializable {
     private String fileName;
     private FileType fileType;
     private String filePath;
+
+    /**
+     * 所属项目ID（上传时可选指定，未关联为 null，序列化为字符串避免前端 JS 精度丢失）
+     */
+    @JsonSerialize(using = ToStringSerializer.class)
+    private Long projectId;
     private FileStatus status;
     private LocalDateTime createTime;
 }

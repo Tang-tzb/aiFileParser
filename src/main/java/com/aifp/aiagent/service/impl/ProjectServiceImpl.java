@@ -5,6 +5,7 @@ import com.aifp.aiagent.dto.*;
 import com.aifp.aiagent.entity.Project;
 import com.aifp.aiagent.exception.BusinessException;
 import com.aifp.aiagent.repository.ProjectMapper;
+import com.aifp.aiagent.service.FileService;
 import com.aifp.aiagent.service.ProjectAccessService;
 import com.aifp.aiagent.service.ProjectService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -21,6 +22,9 @@ import java.util.List;
  * <p>
  * 权限约束：所有读写操作前置调用 {@link ProjectAccessService#canAccess(Long)}，
  * 权限判断不进入 Controller 层；默认实现全放行，后续接入用户体系无需改动本类调用方式。
+ * <p>
+ * 编排约束：项目域守门（权限 + 存在性）在本类，file_record 读写收敛在
+ * {@link FileService}（与 ParseTaskServiceImpl 编排 FormService/FileService 先例一致）。
  *
  * @author Tang_tzb
  */
@@ -31,6 +35,7 @@ public class ProjectServiceImpl implements ProjectService {
 
     private final ProjectMapper projectMapper;
     private final ProjectAccessService projectAccessService;
+    private final FileService fileService;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -94,6 +99,28 @@ public class ProjectServiceImpl implements ProjectService {
         // @TableLogic 自动生效为逻辑删除
         projectMapper.deleteById(id);
         log.info("删除项目成功 projectId={}", id);
+    }
+
+    @Override
+    public PageResult<FileRecordVO> listProjectFiles(Long projectId, PageQuery query) {
+        // 项目域守门：可访问 + 存在才允许查看项目文件
+        ensureAccess(projectId);
+        requireProject(projectId);
+        return fileService.pageByProject(projectId, query);
+    }
+
+    @Override
+    public void associateFile(Long projectId, Long fileId) {
+        ensureAccess(projectId);
+        requireProject(projectId);
+        fileService.associateToProject(projectId, fileId);
+    }
+
+    @Override
+    public void dissociateFile(Long projectId, Long fileId) {
+        ensureAccess(projectId);
+        requireProject(projectId);
+        fileService.dissociateFromProject(projectId, fileId);
     }
 
     // ==================== 内部方法 ====================

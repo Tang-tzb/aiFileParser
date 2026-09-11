@@ -1,17 +1,28 @@
 package com.aifp.aiagent.service.impl;
 
 import com.aifp.aiagent.common.ResultCode;
+import com.aifp.aiagent.dto.PageQuery;
+import com.aifp.aiagent.dto.PageResult;
 import com.aifp.aiagent.entity.FileRecord;
+import com.aifp.aiagent.entity.Project;
 import com.aifp.aiagent.entity.enums.FileStatus;
+import com.aifp.aiagent.entity.enums.FileType;
 import com.aifp.aiagent.exception.BusinessException;
 import com.aifp.aiagent.repository.FileRecordMapper;
+import com.aifp.aiagent.repository.ProjectMapper;
+import com.aifp.aiagent.service.ProjectAccessService;
 import com.aifp.aiagent.service.storage.FileStorageService;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.MediaType;
+import org.springframework.mock.web.MockMultipartFile;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -19,11 +30,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 /**
- * {@link FileServiceImpl#updateStatus} 状态机唯一写入口测试（阶段 13）
+ * {@link FileServiceImpl} 测试
  * <p>
- * 验证：合法迁移正常落库；同态写幂等 no-op 不落库；非法迁移
- * （含用户点名的 SUCCESS → EXTRACTING / SUCCESS → PARSING / VECTORING → PARSING）
- * 抛 {@code FILE_STATUS_ILLEGAL_TRANSITION} 且不落库。
+ * 覆盖两组能力：① {@code updateStatus} 状态机唯一写入口（阶段 13）：合法迁移落库、
+ * 同态写幂等、非法迁移拒绝；② 项目关联（Phase 2）：上传可选归属项目、
+ * 关联/解除关联的归属校验（6003 已绑定其他项目 / 6004 不属于该项目）。
+ * Mapper/Storage/ProjectAccessService 均为 Mockito 模拟，完全离线。
  *
  * @author Tang_tzb
  */
@@ -31,17 +43,23 @@ import static org.mockito.Mockito.*;
 class FileServiceImplTest {
 
     private static final Long FILE_ID = 1785800001L;
+    private static final Long PROJECT_ID = 1785900001L;
 
     @Mock
     private FileRecordMapper fileRecordMapper;
     @Mock
     private FileStorageService fileStorageService;
+    @Mock
+    private ProjectMapper projectMapper;
+    @Mock
+    private ProjectAccessService projectAccessService;
 
     private FileServiceImpl fileService;
 
     @BeforeEach
     void setUp() {
-        fileService = new FileServiceImpl(fileRecordMapper, fileStorageService);
+        fileService = new FileServiceImpl(
+                fileRecordMapper, fileStorageService, projectMapper, projectAccessService);
     }
 
     /**
@@ -109,6 +127,184 @@ class FileServiceImplTest {
                         assertThat(e.getCode()).isEqualTo(ResultCode.FILE_NOT_FOUND.getCode()));
     }
 
+    // ==================== 项目关联（Phase 2） ====================
+
+    /**
+     * 上传不带 projectId：保持历史行为，不触碰项目校验，归属为 null
+     */
+    @Test
+    void upload_withoutProjectId_keepsLegacyBehavior() {
+        stubStorageAndInsert("legacy.pdf");
+        fileService.upload(pdfFile(), null);
+
+        ArgumentCaptor<FileRecord> captor = ArgumentCaptor.forClass(FileRecord.class);
+        verify(fileRecordMapper).insert(captor.capture());
+        assertThat(captor.getValue().getProjectId()).isNull();
+        verifyNoInteractions(projectMapper, projectAccessService);
+    }
+
+    /**
+     * 上传带 projectId：权限+存在校验通过后，记录归属项目
+     */
+    @Test
+    void upload_withProjectId_setsOwnership() {
+        stubStorageAndInsert("owned.pdf");
+        when(projectAccessService.canAccess(PROJECT_ID)).thenReturn(true);
+        when(projectMapper.selectById(PROJECT_ID)).thenReturn(new Project());
+
+        fileService.upload(pdfFile(), PROJECT_ID);
+
+        ArgumentCaptor<FileRecord> captor = ArgumentCaptor.forClass(FileRecord.class);
+        verify(fileRecordMapper).insert(captor.capture());
+        assertThat(captor.getValue().getProjectId()).isEqualTo(PROJECT_ID);
+    }
+
+    /**
+     * 上传带不存在的 projectId：抛 6001，不落库
+     */
+    @Test
+    void upload_projectNotFound_throwsWithoutInsert() {
+        when(projectAccessService.canAccess(PROJECT_ID)).thenReturn(true);
+        when(projectMapper.selectById(PROJECT_ID)).thenReturn(null);
+
+        assertThatThrownBy(() -> fileService.upload(pdfFile(), PROJECT_ID))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.PROJECT_NOT_FOUND.getCode()));
+
+        verify(fileRecordMapper, never()).insert(any(FileRecord.class));
+    }
+
+    /**
+     * 上传带无权限 projectId：抛 FORBIDDEN，不查项目不落库
+     */
+    @Test
+    void upload_accessDenied_throwsForbidden() {
+        when(projectAccessService.canAccess(PROJECT_ID)).thenReturn(false);
+
+        assertThatThrownBy(() -> fileService.upload(pdfFile(), PROJECT_ID))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.FORBIDDEN.getCode()));
+
+        verifyNoInteractions(projectMapper);
+        verify(fileRecordMapper, never()).insert(any(FileRecord.class));
+    }
+
+    /**
+     * 关联成功：未归属文件更新 project_id
+     */
+    @Test
+    void associate_success_updatesOwnership() {
+        FileRecord record = new FileRecord();
+        record.setId(FILE_ID);
+        record.setProjectId(null);
+        when(fileRecordMapper.selectById(FILE_ID)).thenReturn(record);
+
+        fileService.associateToProject(PROJECT_ID, FILE_ID);
+
+        ArgumentCaptor<FileRecord> captor = ArgumentCaptor.forClass(FileRecord.class);
+        verify(fileRecordMapper).updateById(captor.capture());
+        assertThat(captor.getValue().getProjectId()).isEqualTo(PROJECT_ID);
+    }
+
+    /**
+     * 重复关联本项目：幂等 no-op，不更新
+     */
+    @Test
+    void associate_sameProject_idempotentNoUpdate() {
+        FileRecord record = new FileRecord();
+        record.setId(FILE_ID);
+        record.setProjectId(PROJECT_ID);
+        when(fileRecordMapper.selectById(FILE_ID)).thenReturn(record);
+
+        fileService.associateToProject(PROJECT_ID, FILE_ID);
+
+        verify(fileRecordMapper, never()).updateById(any(FileRecord.class));
+    }
+
+    /**
+     * 关联到其他项目（当前已归属他项目）：抛 6003，不更新
+     */
+    @Test
+    void associate_boundToOtherProject_throws6003() {
+        FileRecord record = new FileRecord();
+        record.setId(FILE_ID);
+        record.setProjectId(999L);
+        when(fileRecordMapper.selectById(FILE_ID)).thenReturn(record);
+
+        assertThatThrownBy(() -> fileService.associateToProject(PROJECT_ID, FILE_ID))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.PROJECT_FILE_ALREADY_BOUND.getCode()));
+
+        verify(fileRecordMapper, never()).updateById(any(FileRecord.class));
+    }
+
+    /**
+     * 关联不存在文件：抛 2004
+     */
+    @Test
+    void associate_fileNotFound_throws2004() {
+        when(fileRecordMapper.selectById(FILE_ID)).thenReturn(null);
+
+        assertThatThrownBy(() -> fileService.associateToProject(PROJECT_ID, FILE_ID))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.FILE_NOT_FOUND.getCode()));
+    }
+
+    /**
+     * 解除关联成功：归属该项目的文件 project_id 置空
+     */
+    @Test
+    void dissociate_success_clearsOwnership() {
+        FileRecord record = new FileRecord();
+        record.setId(FILE_ID);
+        record.setProjectId(PROJECT_ID);
+        when(fileRecordMapper.selectById(FILE_ID)).thenReturn(record);
+
+        fileService.dissociateFromProject(PROJECT_ID, FILE_ID);
+
+        ArgumentCaptor<FileRecord> captor = ArgumentCaptor.forClass(FileRecord.class);
+        verify(fileRecordMapper).updateById(captor.capture());
+        assertThat(captor.getValue().getProjectId()).isNull();
+    }
+
+    /**
+     * 解除未归属文件（null 或他项目）：抛 6004，不更新
+     */
+    @Test
+    void dissociate_notBoundToProject_throws6004() {
+        FileRecord unbound = new FileRecord();
+        unbound.setId(FILE_ID);
+        unbound.setProjectId(null);
+        when(fileRecordMapper.selectById(FILE_ID)).thenReturn(unbound);
+
+        assertThatThrownBy(() -> fileService.dissociateFromProject(PROJECT_ID, FILE_ID))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.PROJECT_FILE_NOT_IN_PROJECT.getCode()));
+
+        verify(fileRecordMapper, never()).updateById(any(FileRecord.class));
+    }
+
+    /**
+     * 项目文件分页：IPage 记录转 PageResult，字段透传
+     */
+    @Test
+    void pageByProject_success_convertsPageResult() {
+        FileRecord record = new FileRecord();
+        record.setId(FILE_ID);
+        record.setProjectId(PROJECT_ID);
+        record.setFileName("a.pdf");
+        record.setStatus(FileStatus.UPLOADED);
+        Page<FileRecord> page = new Page<>(1, 10, 1);
+        page.setRecords(List.of(record));
+
+        when(fileRecordMapper.selectPage(any(Page.class), any())).thenReturn(page);
+
+        PageResult<?> result = fileService.pageByProject(PROJECT_ID, new PageQuery());
+
+        assertThat(result.getTotal()).isEqualTo(1L);
+        assertThat(result.getRecords()).hasSize(1);
+    }
+
     // ==================== 测试辅助 ====================
 
     private void stubRecord(FileStatus status) {
@@ -143,5 +339,25 @@ class FileServiceImplTest {
                         assertThat(e.getCode()).isEqualTo(ResultCode.FILE_STATUS_ILLEGAL_TRANSITION.getCode()));
         verify(fileRecordMapper, never()).updateById(any(FileRecord.class));
         org.mockito.Mockito.clearInvocations(fileRecordMapper);
+    }
+
+    /**
+     * 构造合法 PDF 上传文件（文件名扩展名决定 FileType 解析）
+     */
+    private MockMultipartFile pdfFile() {
+        return new MockMultipartFile(
+                "file", "test.pdf", MediaType.APPLICATION_PDF_VALUE, "fake-pdf".getBytes());
+    }
+
+    /**
+     * 打桩存储落盘与 insert 回填雪花 ID
+     */
+    private void stubStorageAndInsert(String storedName) {
+        when(fileStorageService.store(any(), any(FileType.class))).thenReturn("2026/09/" + storedName);
+        when(fileRecordMapper.insert(any(FileRecord.class))).thenAnswer(inv -> {
+            FileRecord r = inv.getArgument(0);
+            r.setId(FILE_ID);
+            return 1;
+        });
     }
 }

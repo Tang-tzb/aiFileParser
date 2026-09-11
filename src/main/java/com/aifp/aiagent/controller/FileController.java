@@ -26,11 +26,15 @@ public class FileController {
     private final FileService fileService;
 
     /**
-     * 上传文件（PDF/Excel/Word），返回文件记录与 UPLOADED 状态
+     * 上传文件（PDF/Excel/Word），返回文件记录与 UPLOADED 状态。
+     * <p>
+     * {@code projectId} 可选：传入时上传即归属该项目（校验项目可访问且存在）；
+     * 不传保持历史行为（未关联项目，历史数据兼容）。
      */
     @PostMapping("/upload")
-    public Result<FileUploadVO> upload(@RequestParam("file") MultipartFile file) {
-        return Result.success(fileService.upload(file));
+    public Result<FileUploadVO> upload(@RequestParam("file") MultipartFile file,
+                                       @RequestParam(value = "projectId", required = false) Long projectId) {
+        return Result.success(fileService.upload(file, projectId));
     }
 
     /**

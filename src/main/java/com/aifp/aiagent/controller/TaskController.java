@@ -42,11 +42,13 @@ public class TaskController {
     private long sseTimeoutMs;
 
     /**
-     * 启动异步解析任务（绑定 formId + fileId），立即返回 taskId。
+     * 启动异步解析任务（可选绑定 projectId；projectId 非空时校验文件归属项目），
+     * 立即返回 taskId。旧报文（formId+fileId）完全兼容。
      */
     @PostMapping
     public Result<TaskStartVO> start(@Valid @RequestBody TaskStartRequest request) {
-        return Result.success(parseTaskService.start(request.getFormId(), request.getFileId()));
+        return Result.success(parseTaskService.start(
+                request.getProjectId(), request.getFormId(), request.getFileId()));
     }
 
     /**
