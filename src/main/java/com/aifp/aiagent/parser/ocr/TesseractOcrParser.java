@@ -41,10 +41,6 @@ import java.util.concurrent.TimeUnit;
 public class TesseractOcrParser implements OcrParser {
 
     /**
-     * 识别并发闸门：同步调用天然串行，信号量硬约束防上层误并发。
-     */
-    private final Semaphore permits = new Semaphore(1);
-    /**
      * 识别引擎可执行文件：默认走 PATH（裸命令名），平台差异经环境变量覆盖
      */
     @Value("${document.parser.pdf.ocr.tesseract-path:tesseract}")
@@ -69,6 +65,10 @@ public class TesseractOcrParser implements OcrParser {
      */
     @Value("${document.parser.pdf.ocr.concurrency:1}")
     private int concurrency = 1;
+    /**
+     * 识别并发闸门：同步调用天然串行，信号量硬约束防上层误并发。
+     */
+    private final Semaphore permits = new Semaphore(concurrency);
 
     /**
      * TSV 解析（纯函数）：仅取 level=5（词）、conf≥0、text 非空白的行；

@@ -90,6 +90,53 @@ CREATE TABLE IF NOT EXISTS form_field_definition
 )
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='表单字段定义表';
 
+-- ============================================================
+-- aiFileParser 项目模块（Phase 1）：项目域 DDL
+-- ============================================================
+
+-- ---------------- 项目表 ----------------
+CREATE TABLE IF NOT EXISTS project
+(
+    id
+    BIGINT
+    NOT
+    NULL
+    COMMENT
+    '主键ID(雪花算法)',
+    project_no
+    VARCHAR
+(
+    64
+) NOT NULL COMMENT '项目编号(业务唯一标识)',
+    project_name VARCHAR
+(
+    100
+) NOT NULL COMMENT '项目名称',
+    description VARCHAR
+(
+    500
+) DEFAULT NULL COMMENT '项目描述',
+    status VARCHAR
+(
+    20
+) NOT NULL DEFAULT 'ACTIVE' COMMENT '状态:ACTIVE进行中/ARCHIVED归档',
+    create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    deleted TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除:0正常 1删除',
+    PRIMARY KEY
+(
+    id
+),
+    UNIQUE KEY uk_project_no
+(
+    project_no
+),
+    KEY idx_project_name
+(
+    project_name
+)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='项目表';
+
 -- ---------------- 文件记录表 ----------------
 CREATE TABLE IF NOT EXISTS file_record
 (

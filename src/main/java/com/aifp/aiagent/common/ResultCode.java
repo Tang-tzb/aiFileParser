@@ -52,7 +52,11 @@ public enum ResultCode {
     FORM_NOT_FOUND(5001, "表单不存在"),
     FIELD_CODE_DUPLICATE(5002, "字段编码在表单内重复"),
     FIELD_NOT_FOUND(5003, "字段不存在"),
-    FORM_FIELD_EMPTY(5004, "表单未配置字段");
+    FORM_FIELD_EMPTY(5004, "表单未配置字段"),
+
+    // 业务模块段：6xxx 项目
+    PROJECT_NOT_FOUND(6001, "项目不存在"),
+    PROJECT_NO_DUPLICATE(6002, "项目编号已存在");
 
     private final Integer code;
     private final String message;
