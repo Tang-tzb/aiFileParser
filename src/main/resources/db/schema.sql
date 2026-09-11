@@ -137,6 +137,143 @@ CREATE TABLE IF NOT EXISTS project
 )
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='项目表';
 
+-- ============================================================
+-- aiFileParser 项目模块（Phase 3）：项目表单域 DDL
+-- ============================================================
+
+-- ---------------- 项目表单实例表 ----------------
+CREATE TABLE IF NOT EXISTS project_form
+(
+    id
+    BIGINT
+    NOT
+    NULL
+    COMMENT
+    '主键ID(雪花算法)',
+    project_id
+    BIGINT
+    NOT
+    NULL
+    COMMENT
+    '所属项目ID(project)',
+    form_id
+    BIGINT
+    NOT
+    NULL
+    COMMENT
+    '表单定义ID(form_definition)',
+    source_file_id
+    BIGINT
+    DEFAULT
+    NULL
+    COMMENT
+    '首个来源文件ID(Phase 4 抽取触发时回填)',
+    version
+    INT
+    NOT
+    NULL
+    DEFAULT
+    1
+    COMMENT
+    '抽取版本号(Phase 4 起递增)',
+    status
+    VARCHAR
+(
+    20
+) NOT NULL DEFAULT 'ACTIVE' COMMENT '状态:ACTIVE有效/ARCHIVED归档',
+    create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    deleted TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除:0正常 1删除',
+    PRIMARY KEY
+(
+    id
+),
+    UNIQUE KEY uk_project_form
+(
+    project_id,
+    form_id
+),
+    KEY idx_pf_form_id
+(
+    form_id
+)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='项目表单实例表';
+
+-- ---------------- 项目表单字段值表 ----------------
+CREATE TABLE IF NOT EXISTS project_form_field_value
+(
+    id
+    BIGINT
+    NOT
+    NULL
+    COMMENT
+    '主键ID(雪花算法)',
+    project_form_id
+    BIGINT
+    NOT
+    NULL
+    COMMENT
+    '项目表单实例ID(project_form)',
+    field_id
+    BIGINT
+    NOT
+    NULL
+    COMMENT
+    '字段定义ID(form_field_definition)',
+    field_code
+    VARCHAR
+(
+    64
+) NOT NULL COMMENT '字段编码(定义快照)',
+    field_name VARCHAR
+(
+    100
+) NOT NULL COMMENT '字段名称(定义快照)',
+    field_type VARCHAR
+(
+    20
+) NOT NULL COMMENT '字段类型(定义快照)',
+    raw_value VARCHAR
+(
+    1000
+) DEFAULT NULL COMMENT '原始抽取值',
+    normalized_value VARCHAR
+(
+    1000
+) DEFAULT NULL COMMENT '标准化值(万/亿换算/日期ISO,用于比较排序)',
+    unit VARCHAR
+(
+    50
+) DEFAULT NULL COMMENT '单位',
+    source_file_id BIGINT DEFAULT NULL COMMENT '来源文件ID(file_record)',
+    source_chunk_id VARCHAR
+(
+    64
+) DEFAULT NULL COMMENT '来源ChunkID',
+    source_page INT DEFAULT NULL COMMENT '来源页码',
+    confidence DECIMAL
+(
+    5,
+    4
+) DEFAULT NULL COMMENT '抽取置信度(0~1)',
+    create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+    deleted TINYINT NOT NULL DEFAULT 0 COMMENT '逻辑删除:0正常 1删除',
+    PRIMARY KEY
+(
+    id
+),
+    KEY idx_pffv_project_form
+(
+    project_form_id
+),
+    KEY idx_pffv_form_field
+(
+    project_form_id,
+    field_code
+)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='项目表单字段值表';
+
 -- ---------------- 文件记录表 ----------------
 CREATE TABLE IF NOT EXISTS file_record
 (

@@ -2,7 +2,7 @@ package com.aifp.aiagent.service.impl;
 
 import com.aifp.aiagent.common.ResultCode;
 import com.aifp.aiagent.dto.ExtractionResult;
-import com.aifp.aiagent.dto.FieldError;
+import com.aifp.aiagent.dto.FileRecordVO;
 import com.aifp.aiagent.dto.FormFieldVO;
 import com.aifp.aiagent.dto.FormVO;
 import com.aifp.aiagent.entity.enums.FileStatus;
@@ -11,6 +11,7 @@ import com.aifp.aiagent.rag.*;
 import com.aifp.aiagent.service.FieldExtractorService;
 import com.aifp.aiagent.service.FileService;
 import com.aifp.aiagent.service.FormService;
+import com.aifp.aiagent.service.ProjectFormPersistenceService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -56,6 +57,7 @@ public class FieldExtractorServiceImpl implements FieldExtractorService {
     private final FieldSchemaValidator fieldSchemaValidator;
     private final ChatModel chatModel;
     private final ObjectMapper objectMapper;
+    private final ProjectFormPersistenceService projectFormPersistenceService;
 
     @Value("${rag.retrieve.topK:5}")
     private int topK;
@@ -68,18 +70,28 @@ public class FieldExtractorServiceImpl implements FieldExtractorService {
 
     @Override
     public ExtractionResult extract(Long formId, Long fileId) {
-        // 幂等：确保文档已入 Milvus（已入库则跳过）
+        // 需求 §九：历史 API 兼容——根据 fileId 解析归属 projectId 后走项目链路
+        // （文件未归属项目时 projectId=null，跳过项目域持久化，抽取行为不变）
+        FileRecordVO file = fileService.getById(fileId);
+        return extract(file == null ? null : file.getProjectId(), formId, fileId);
+    }
+
+    @Override
+    public ExtractionResult extract(Long projectId, Long formId, Long fileId) {
+        // 幂等：确保文档已入 Milvus（已入库则跳过；/fill 直调路径依赖本调用）
         ingestionService.ingest(fileId);
+        FileRecordVO file = fileService.getById(fileId);
+        ensureFileProjectConsistency(projectId, file);
         // 阶段 13 状态机适配：SUCCESS 为终态不可逆。换表单重新抽取合法，
         // 但跳过 EXTRACTING/SUCCESS 状态写，避免 SUCCESS → EXTRACTING 非法跳转。
-        boolean alreadySuccess = fileService.getById(fileId).getStatus() == FileStatus.SUCCESS;
+        boolean alreadySuccess = file.getStatus() == FileStatus.SUCCESS;
         try {
-            ExtractionResult result = doExtract(formId, fileId, alreadySuccess);
-            log.info("字段抽取完成 formId={}, fileId={}, attempts={}, errors={}",
-                    formId, fileId, result.getAttemptsUsed(), result.getErrors().size());
+            ExtractionResult result = doExtract(projectId, formId, fileId, alreadySuccess);
+            log.info("字段抽取完成 formId={}, fileId={}, projectId={}, attempts={}, errors={}",
+                    formId, fileId, projectId, result.getAttemptsUsed(), result.getErrors().size());
             return result;
         } catch (Exception e) {
-            // 阶段 13：抽取失败（AI 调用/检索为空/Retry 耗尽）落 FAILED，
+            // 阶段 13：抽取失败（AI 调用/检索为空/Retry 耗尽/持久化失败）落 FAILED，
             // 异常原样重抛保持对外契约不变；SUCCESS 文件重抽取失败不改状态。
             markFailed(fileId, alreadySuccess);
             throw e;
@@ -87,29 +99,61 @@ public class FieldExtractorServiceImpl implements FieldExtractorService {
     }
 
     /**
-     * 实际抽取流程：EXTRACTING → 检索合并 → Retry 循环 → SUCCESS。
+     * 项目归属一致性校验：显式 projectId 与文件归属均非空且不一致时拒绝
+     * （与 ParseTaskServiceImpl.ensureFileInProject 同语义，防跨项目错绑）。
+     */
+    private void ensureFileProjectConsistency(Long projectId, FileRecordVO file) {
+        if (projectId != null && file.getProjectId() != null
+                && !projectId.equals(file.getProjectId())) {
+            throw new BusinessException(ResultCode.PROJECT_FILE_NOT_IN_PROJECT);
+        }
+    }
+
+    /**
+     * 实际抽取流程：EXTRACTING → 检索合并 → Retry 循环 → 持久化 → SUCCESS。
+     * <p>
+     * 业务闭环约束：项目字段值持久化先于 SUCCESS 状态写——持久化失败时异常外抛，
+     * 由 {@code extract} 失败链路接管（落 FAILED），保证不出现
+     * "文件 SUCCESS 但项目字段值未落库"。
      *
+     * @param projectId       项目ID（null 跳过持久化，历史兼容）
      * @param skipStatusWrites SUCCESS 终态文件重抽取时跳过状态写
      */
-    private ExtractionResult doExtract(Long formId, Long fileId, boolean skipStatusWrites) {
+    private ExtractionResult doExtract(Long projectId, Long formId, Long fileId, boolean skipStatusWrites) {
         List<FormFieldVO> fields = loadFields(formId);
         if (!skipStatusWrites) {
             fileService.updateStatus(fileId, FileStatus.EXTRACTING);
         }
 
-        // 按字段检索 + 合并去重（带 fileId 过滤避免跨文件污染）
+        // 按字段检索 + 合并去重（带 fileId 过滤避免跨文件污染；项目范围过滤属后续 Phase，不得提前加）
         String filter = "fileId == '" + fileId + "'";
         List<Document> chunks = retrieveAndMerge(fields, filter);
         if (chunks.isEmpty()) {
             throw new BusinessException(ResultCode.VECTOR_RETRIEVE_ERROR, "未检索到相关文档切片");
         }
+        // 片段编号索引：与 ExtractionPromptBuilder 的 [C{n}] 编号规则一致（同下标 i+1），修改需同步
+        Map<String, Document> markerToDoc = buildMarkerIndex(chunks);
 
         // Retry 循环：LLM 调用 → JSON 解析 → Schema 校验 → 失败反馈重试
-        ExtractionResult result = extractWithRetry(fields, chunks);
+        ExtractionResult result = extractWithRetry(fields, chunks, markerToDoc);
+        if (projectId != null) {
+            projectFormPersistenceService.persistExtraction(projectId, formId, fileId, fields, result);
+        }
         if (!skipStatusWrites) {
             fileService.updateStatus(fileId, FileStatus.SUCCESS);
         }
         return result;
+    }
+
+    /**
+     * 构建 片段编号→Document 映射（C1..Cn 按列表顺序，供 LLM 引用溯源解析）。
+     */
+    private Map<String, Document> buildMarkerIndex(List<Document> chunks) {
+        Map<String, Document> markerToDoc = new LinkedHashMap<>();
+        for (int i = 0; i < chunks.size(); i++) {
+            markerToDoc.put("C" + (i + 1), chunks.get(i));
+        }
+        return markerToDoc;
     }
 
     /**
@@ -130,35 +174,102 @@ public class FieldExtractorServiceImpl implements FieldExtractorService {
     /**
      * Retry 循环：每次校验失败把字段错误反馈给 AI 修正，直至无错误或耗尽重试次数。
      * JSON 解析失败立即抛 3002，不进入字段级 Retry（属响应格式问题，非字段问题）。
+     * <p>
+     * sources 为旁路软依赖：validator 只遍历字段定义，LLM 多返回的 sources 键被天然忽略，
+     * 缺失/非法不影响抽取成功语义（不修改既有 JSON 校验契约）。
      */
-    private ExtractionResult extractWithRetry(List<FormFieldVO> fields, List<Document> chunks) {
+    private ExtractionResult extractWithRetry(List<FormFieldVO> fields, List<Document> chunks,
+                                              Map<String, Document> markerToDoc) {
         String userPrompt = extractionPromptBuilder.buildUserPrompt(chunks);
         int totalCalls = maxAttempts + 1;
         FieldSchemaValidator.ValidationResult vr = null;
+        Map<String, String> citedMarkers = Map.of();
         String feedback = null;
         int used = 0;
         for (int i = 0; i < totalCalls; i++) {
             used = i + 1;
             String systemPrompt = extractionPromptBuilder.buildSystemPrompt(fields, feedback);
             Map<String, Object> raw = parseJson(callChatModel(systemPrompt, userPrompt));
+            citedMarkers = extractCitedMarkers(raw);
             vr = fieldSchemaValidator.validate(raw, fields);
             if (!vr.hasErrors()) {
-                return buildResult(vr.getCoerced(), List.of(), used);
+                return buildResult(vr, citedMarkers, markerToDoc, used);
             }
             feedback = extractionPromptBuilder.buildRetryFeedback(vr.getErrors());
         }
-        return buildResult(vr.getCoerced(), vr.getErrors(), used);
+        return buildResult(vr, citedMarkers, markerToDoc, used);
     }
 
     /**
-     * 组装 {@link ExtractionResult}。
+     * 提取 LLM 返回的 sources 旁路键（fieldCode → 片段编号如 "C2"）；
+     * 缺失或非法形态返回空 Map（软依赖，不影响主流程）。
      */
-    private ExtractionResult buildResult(Map<String, Object> values, List<FieldError> errors, int used) {
+    private Map<String, String> extractCitedMarkers(Map<String, Object> raw) {
+        Object obj = raw == null ? null : raw.get("sources");
+        if (!(obj instanceof Map<?, ?> map)) {
+            return Map.of();
+        }
+        Map<String, String> markers = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> e : map.entrySet()) {
+            if (e.getKey() != null && e.getValue() != null) {
+                markers.put(String.valueOf(e.getKey()), String.valueOf(e.getValue()));
+            }
+        }
+        return markers;
+    }
+
+    /**
+     * 组装 {@link ExtractionResult}：类型化值 + LLM 原始值快照 + 引用式溯源 + 字段错误。
+     * 溯源解析：sourceChunkId=Document.getId()、sourcePage=被引用 Chunk metadata；
+     * 未知编号不猜测、缺 metadata 省略（禁止按下标/相似度猜来源）。
+     */
+    private ExtractionResult buildResult(FieldSchemaValidator.ValidationResult vr,
+                                         Map<String, String> citedMarkers,
+                                         Map<String, Document> markerToDoc, int used) {
         ExtractionResult r = new ExtractionResult();
-        r.setValues(values);
-        r.setErrors(errors);
+        r.setValues(vr.getCoerced());
+        r.setRawValues(vr.getRaws());
+        r.setErrors(vr.getErrors());
         r.setAttemptsUsed(used);
+        fillSourceRefs(r, citedMarkers, markerToDoc);
         return r;
+    }
+
+    /**
+     * 解析引用编号为溯源事实并装入结果：仅当编号能命中片段索引时记录，
+     * sourcePage 取被引用 Chunk metadata 的 pageStart（阶段 12 语义）或 page（旧切片路径）。
+     */
+    private void fillSourceRefs(ExtractionResult r, Map<String, String> citedMarkers,
+                                Map<String, Document> markerToDoc) {
+        Map<String, String> sources = new LinkedHashMap<>();
+        Map<String, Integer> sourcePages = new LinkedHashMap<>();
+        for (Map.Entry<String, String> e : citedMarkers.entrySet()) {
+            Document doc = markerToDoc.get(e.getValue());
+            if (doc == null) {
+                continue;
+            }
+            sources.put(e.getKey(), doc.getId());
+            Integer page = resolveChunkPage(doc);
+            if (page != null) {
+                sourcePages.put(e.getKey(), page);
+            }
+        }
+        r.setSources(sources);
+        r.setSourcePages(sourcePages);
+    }
+
+    /**
+     * 从被引用 Chunk 的 metadata 解析来源页码：优先 pageStart（PDF 路径），回退 page（旧路径）。
+     */
+    private Integer resolveChunkPage(Document doc) {
+        Object page = doc.getMetadata().get("pageStart");
+        if (page == null) {
+            page = doc.getMetadata().get("page");
+        }
+        if (page instanceof Integer i) {
+            return i;
+        }
+        return page instanceof Number n ? n.intValue() : null;
     }
 
     /**

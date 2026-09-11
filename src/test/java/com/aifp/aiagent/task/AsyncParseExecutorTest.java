@@ -16,7 +16,8 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 /**
@@ -32,6 +33,7 @@ class AsyncParseExecutorTest {
 
     private static final Long FORM_ID = 1785508135L;
     private static final Long FILE_ID = 1785800001L;
+    private static final Long PROJECT_ID = 1785900001L;
 
     @Mock
     private DocumentIngestionService ingestionService;
@@ -49,14 +51,15 @@ class AsyncParseExecutorTest {
 
     /**
      * 成功：ingest 回调 PARSING→0%、VECTORING→50%，随后 80%、100% 携带 result。
+     * projectId 穿透（需求 §十）：extract 收到三参项目维度调用。
      */
     @Test
     void run_success_publishesFourStagesInOrder() {
         stubIngestWithCallback();
         ExtractionResult result = buildResult();
-        when(fieldExtractorService.extract(FORM_ID, FILE_ID)).thenReturn(result);
+        when(fieldExtractorService.extract(PROJECT_ID, FORM_ID, FILE_ID)).thenReturn(result);
 
-        executor.run("task-1", FORM_ID, FILE_ID);
+        executor.run("task-1", PROJECT_ID, FORM_ID, FILE_ID);
 
         List<TaskProgress> published = capturePublished();
         assertThat(published).extracting(TaskProgress::getPercent)
@@ -64,23 +67,24 @@ class AsyncParseExecutorTest {
         assertThat(published).extracting(TaskProgress::getStatus)
                 .containsExactly("PARSING", "VECTORING", "EXTRACTING", "SUCCESS");
         assertThat(published.get(3).getResult()).isSameAs(result);
+        verify(fieldExtractorService).extract(PROJECT_ID, FORM_ID, FILE_ID);
     }
 
     /**
-     * 失败：ingest 抛异常 → 仅发布 FAILED。
+     * 失败：ingest 抛异常 → 仅发布 FAILED（projectId=null 历史行为同样适用）。
      */
     @Test
     void run_ingestFailure_publishesFailed() {
         doThrow(new RuntimeException("解析失败"))
                 .when(ingestionService).ingest(eq(FILE_ID), any(ProgressCallback.class));
 
-        executor.run("task-2", FORM_ID, FILE_ID);
+        executor.run("task-2", null, FORM_ID, FILE_ID);
 
         List<TaskProgress> published = capturePublished();
         assertThat(published).hasSize(1);
         assertThat(published.get(0).getStatus()).isEqualTo("FAILED");
         assertThat(published.get(0).getPercent()).isEqualTo(-1);
-        verify(fieldExtractorService, never()).extract(anyLong(), anyLong());
+        verify(fieldExtractorService, never()).extract(any(), any(), any());
     }
 
     // ==================== 测试辅助 ====================

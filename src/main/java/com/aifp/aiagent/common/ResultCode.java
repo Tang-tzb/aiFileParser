@@ -58,7 +58,9 @@ public enum ResultCode {
     PROJECT_NOT_FOUND(6001, "项目不存在"),
     PROJECT_NO_DUPLICATE(6002, "项目编号已存在"),
     PROJECT_FILE_ALREADY_BOUND(6003, "文件已关联其他项目"),
-    PROJECT_FILE_NOT_IN_PROJECT(6004, "文件不属于该项目");
+    PROJECT_FILE_NOT_IN_PROJECT(6004, "文件不属于该项目"),
+    PROJECT_FORM_DUPLICATE(6005, "表单已绑定该项目"),
+    PROJECT_FORM_NOT_FOUND(6006, "项目表单不存在");
 
     private final Integer code;
     private final String message;

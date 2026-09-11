@@ -69,7 +69,7 @@ class TaskControllerTest {
 
     @Test
     void start_valid_returnsTaskId() throws Exception {
-        when(parseTaskService.start(FORM_ID, FILE_ID))
+        when(parseTaskService.start(null, FORM_ID, FILE_ID))
                 .thenReturn(new TaskStartVO("task-1", FILE_ID, FORM_ID, LocalDateTime.now()));
 
         mockMvc.perform(post("/task")
@@ -82,7 +82,27 @@ class TaskControllerTest {
                 .andExpect(jsonPath("$.data.formId").value(String.valueOf(FORM_ID)))
                 .andExpect(jsonPath("$.data.fileId").value(String.valueOf(FILE_ID)));
 
-        verify(parseTaskService).start(FORM_ID, FILE_ID);
+        verify(parseTaskService).start(null, FORM_ID, FILE_ID);
+    }
+
+    /**
+     * 报文含 projectId → service 收到 projectId（Phase 2 可选归属校验透传）
+     */
+    @Test
+    void start_withProjectId_passesProjectId() throws Exception {
+        when(parseTaskService.start(PROJECT_ID, FORM_ID, FILE_ID))
+                .thenReturn(new TaskStartVO("task-2", FILE_ID, FORM_ID, LocalDateTime.now()));
+
+        mockMvc.perform(post("/task")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"projectId\":" + PROJECT_ID + ",\"formId\":" + FORM_ID
+                                + ",\"fileId\":" + FILE_ID + "}"))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.taskId").value("task-2"));
+
+        verify(parseTaskService).start(PROJECT_ID, FORM_ID, FILE_ID);
     }
 
     @Test
@@ -93,7 +113,7 @@ class TaskControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(40001));
 
-        verify(parseTaskService, never()).start(anyLong(), anyLong());
+        verify(parseTaskService, never()).start(any(), anyLong(), anyLong());
     }
 
     /**

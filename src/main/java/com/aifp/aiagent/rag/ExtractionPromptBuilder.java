@@ -27,7 +27,10 @@ public class ExtractionPromptBuilder {
     private static final String USER_PROMPT_HEADER = "文档片段：\n";
 
     private static final String USER_PROMPT_FOOTER =
-            "\n\n请严格按上述 schema 输出一个 JSON 对象，缺失字段用 null，不要解释。";
+            "\n\n请严格按上述 schema 输出一个 JSON 对象，缺失字段用 null，不要解释。"
+                    + "\n另外可携带一个旁路键 \"sources\"：key 为字段编码，value 为该字段值来源的片段编号（如 \"C2\"）；"
+                    + "无法确定来源时省略对应条目，除 sources 外不要返回任何其他额外键。"
+                    + "\nsources 仅为可选溯源信息，缺失不影响抽取结果本身。";
 
     private static final String RETRY_FEEDBACK_HEADER =
             "\n\n上一次返回存在以下问题，请修正后重新返回完整 JSON：\n";
@@ -75,7 +78,11 @@ public class ExtractionPromptBuilder {
     }
 
     /**
-     * 构建用户提示（拼接 chunks 内容）。
+     * 构建用户提示（拼接 chunks 内容，每片段前置编号行供 LLM 引用溯源）。
+     * <p>
+     * 编号规则：{@code [C{n}]}，n 从 1 起按列表顺序递增；调用方
+     * （FieldExtractorServiceImpl）按同一规则构建 marker→Document 映射，
+     * 两侧规则必须一致，修改需同步。
      *
      * @param chunks 检索命中的切片
      * @return 用户提示文本
@@ -86,7 +93,8 @@ public class ExtractionPromptBuilder {
             if (i > 0) {
                 sb.append("\n---\n");
             }
-            sb.append(chunks.get(i).getText());
+            sb.append("[C").append(i + 1).append("]\n")
+                    .append(chunks.get(i).getText());
         }
         sb.append(USER_PROMPT_FOOTER);
         return sb.toString();

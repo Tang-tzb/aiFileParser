@@ -27,6 +27,24 @@ public class ExtractionResult implements Serializable {
     private Map<String, Object> values;
 
     /**
+     * 字段原始值（key=fieldCode，value 为 LLM 原始返回、Validator coerce 前快照）。
+     * 与 {@link #values} 同键集合（含 null），供 rawValue 落库与错误归因。
+     */
+    private Map<String, Object> rawValues;
+
+    /**
+     * 字段来源 Chunk（key=fieldCode，value=向量库 Document.getId()）。
+     * LLM 引用式溯源（软依赖）：未引用到对应片段则无该键，禁止按下标/相似度猜测。
+     */
+    private Map<String, String> sources;
+
+    /**
+     * 字段来源页码（key=fieldCode，value=被引用 Chunk metadata 的 pageStart/page）。
+     * 与 {@link #sources} 同键集合。
+     */
+    private Map<String, Integer> sourcePages;
+
+    /**
      * 剩余字段级错误（Retry 耗尽后仍存在的）
      */
     private List<FieldError> errors;

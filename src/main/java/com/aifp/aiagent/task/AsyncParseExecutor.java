@@ -30,17 +30,23 @@ public class AsyncParseExecutor {
 
     /**
      * 执行异步流水线。{@link Async} 代理生效需跨 bean 调用。
+     * <p>
+     * projectId 语义（需求 §十）：非空时抽取结果持久化到项目域（先持久化后 SUCCESS）；
+     * null 保持历史行为（跳过项目域持久化），由 {@code FieldExtractorService} 实现兜底。
+     *
+     * @param projectId 项目ID（可空）
      */
     @Async("parseExecutor")
-    public void run(String taskId, Long formId, Long fileId) {
+    public void run(String taskId, Long projectId, Long formId, Long fileId) {
         TaskProgress base = new TaskProgress(taskId, fileId, formId,
                 "PARSING", 0, "任务初始化", null);
         try {
             ingestWithProgress(base, fileId);
             progressPublisher.publish(base.with("EXTRACTING", 80, "AI抽取中", null));
-            ExtractionResult result = fieldExtractorService.extract(formId, fileId);
+            ExtractionResult result = fieldExtractorService.extract(projectId, formId, fileId);
             progressPublisher.publish(base.with("SUCCESS", 100, "完成", result));
-            log.info("异步任务完成 taskId={}, formId={}, fileId={}", taskId, formId, fileId);
+            log.info("异步任务完成 taskId={}, projectId={}, formId={}, fileId={}",
+                    taskId, projectId, formId, fileId);
         } catch (Exception e) {
             log.error("异步任务失败 taskId={}: {}", taskId, e.getMessage(), e);
             progressPublisher.publish(base.with("FAILED", -1, "处理失败: " + e.getMessage(), null));

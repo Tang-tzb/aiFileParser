@@ -4,9 +4,11 @@ import com.aifp.aiagent.common.ResultCode;
 import com.aifp.aiagent.dto.*;
 import com.aifp.aiagent.entity.enums.FileStatus;
 import com.aifp.aiagent.entity.enums.FileType;
+import com.aifp.aiagent.entity.enums.ProjectFormStatus;
 import com.aifp.aiagent.entity.enums.ProjectStatus;
 import com.aifp.aiagent.exception.BusinessException;
 import com.aifp.aiagent.exception.GlobalExceptionHandler;
+import com.aifp.aiagent.service.ProjectFormService;
 import com.aifp.aiagent.service.ProjectService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
@@ -47,10 +49,14 @@ class ProjectControllerTest {
 
     private static final Long PROJECT_ID = 1785900001L;
     private static final Long FILE_ID = 1785800001L;
+    private static final Long FORM_ID = 1785700001L;
+    private static final Long PROJECT_FORM_ID = 1785600001L;
     private final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
     private MockMvc mockMvc;
     @Mock
     private ProjectService projectService;
+    @Mock
+    private ProjectFormService projectFormService;
 
     @InjectMocks
     private ProjectController projectController;
@@ -388,6 +394,128 @@ class ProjectControllerTest {
                 .andExpect(jsonPath("$.message").value("文件不属于该项目"));
     }
 
+    // ==================== 项目表单实例（Phase 3） ====================
+
+    /**
+     * 绑定表单 → 200, data=projectFormId（字符串序列化防精度丢失）
+     */
+    @Test
+    void bindForm_success_returnsProjectFormId() throws Exception {
+        when(projectFormService.createProjectForm(eq(PROJECT_ID), any(ProjectFormCreateDTO.class)))
+                .thenReturn(PROJECT_FORM_ID);
+
+        mockMvc.perform(post("/project/{id}/form", PROJECT_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(validFormCreateDTO())))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data").value(String.valueOf(PROJECT_FORM_ID)));
+
+        verify(projectFormService).createProjectForm(eq(PROJECT_ID), any(ProjectFormCreateDTO.class));
+    }
+
+    /**
+     * formId 缺失 → 40001, service 未被调用
+     */
+    @Test
+    void bindForm_missingFormId_returns40001() throws Exception {
+        mockMvc.perform(post("/project/{id}/form", PROJECT_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(40001))
+                .andExpect(jsonPath("$.message").exists());
+
+        verifyNoInteractions(projectFormService);
+    }
+
+    /**
+     * 重复绑定 → 6005
+     */
+    @Test
+    void bindForm_duplicate_returns6005() throws Exception {
+        when(projectFormService.createProjectForm(eq(PROJECT_ID), any(ProjectFormCreateDTO.class)))
+                .thenThrow(new BusinessException(ResultCode.PROJECT_FORM_DUPLICATE));
+
+        mockMvc.perform(post("/project/{id}/form", PROJECT_ID)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(validFormCreateDTO())))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(6005))
+                .andExpect(jsonPath("$.message").value("表单已绑定该项目"));
+    }
+
+    /**
+     * 项目表单分页 → 200，records 含 formName
+     */
+    @Test
+    void forms_success_returnsPageRecords() throws Exception {
+        PageResult<ProjectFormVO> pr = PageResult.of(
+                1L, 1L, 1L, 10L, List.of(sampleFormVO()));
+
+        when(projectFormService.listProjectForms(eq(PROJECT_ID), any(PageQuery.class))).thenReturn(pr);
+
+        mockMvc.perform(get("/project/{id}/forms", PROJECT_ID)
+                        .param("pageNum", "1")
+                        .param("pageSize", "10"))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.total").value(1))
+                .andExpect(jsonPath("$.data.records[0].projectFormId").value(String.valueOf(PROJECT_FORM_ID)))
+                .andExpect(jsonPath("$.data.records[0].formName").value("施工许可证表单"));
+
+        verify(projectFormService).listProjectForms(eq(PROJECT_ID), any(PageQuery.class));
+    }
+
+    /**
+     * 项目表单分页：项目不存在 → 6001
+     */
+    @Test
+    void forms_projectNotFound_returns6001() throws Exception {
+        when(projectFormService.listProjectForms(eq(9999L), any(PageQuery.class)))
+                .thenThrow(new BusinessException(ResultCode.PROJECT_NOT_FOUND));
+
+        mockMvc.perform(get("/project/{id}/forms", 9999L))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(6001))
+                .andExpect(jsonPath("$.message").value("项目不存在"));
+    }
+
+    /**
+     * 项目表单详情 → 200, data 含 status/version
+     */
+    @Test
+    void form_success_returnsDetail() throws Exception {
+        when(projectFormService.getProjectForm(PROJECT_ID, PROJECT_FORM_ID)).thenReturn(sampleFormVO());
+
+        mockMvc.perform(get("/project/{id}/form/{projectFormId}", PROJECT_ID, PROJECT_FORM_ID))
+                .andDo(print())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(200))
+                .andExpect(jsonPath("$.data.projectFormId").value(String.valueOf(PROJECT_FORM_ID)))
+                .andExpect(jsonPath("$.data.formId").value(String.valueOf(FORM_ID)))
+                .andExpect(jsonPath("$.data.version").value(1))
+                .andExpect(jsonPath("$.data.status").value("ACTIVE"));
+
+        verify(projectFormService).getProjectForm(PROJECT_ID, PROJECT_FORM_ID);
+    }
+
+    /**
+     * 详情：实例不存在或归属其他项目 → 6006（统一不泄露存在性）
+     */
+    @Test
+    void form_notFound_returns6006() throws Exception {
+        when(projectFormService.getProjectForm(PROJECT_ID, PROJECT_FORM_ID))
+                .thenThrow(new BusinessException(ResultCode.PROJECT_FORM_NOT_FOUND));
+
+        mockMvc.perform(get("/project/{id}/form/{projectFormId}", PROJECT_ID, PROJECT_FORM_ID))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(6006))
+                .andExpect(jsonPath("$.message").value("项目表单不存在"));
+    }
+
     // ==================== 测试数据构造 ====================
 
     /**
@@ -411,6 +539,31 @@ class ProjectControllerTest {
         dto.setProjectName("职业教育园一期");
         dto.setDescription("职业教育园一期工程项目");
         return dto;
+    }
+
+    /**
+     * 绑定表单请求体：formId
+     */
+    private ProjectFormCreateDTO validFormCreateDTO() {
+        ProjectFormCreateDTO dto = new ProjectFormCreateDTO();
+        dto.setFormId(FORM_ID);
+        return dto;
+    }
+
+    /**
+     * 项目表单实例 VO：含冗余 formName 与初始状态
+     */
+    private ProjectFormVO sampleFormVO() {
+        ProjectFormVO vo = new ProjectFormVO();
+        vo.setProjectFormId(PROJECT_FORM_ID);
+        vo.setProjectId(PROJECT_ID);
+        vo.setFormId(FORM_ID);
+        vo.setFormName("施工许可证表单");
+        vo.setVersion(1);
+        vo.setStatus(ProjectFormStatus.ACTIVE);
+        vo.setCreateTime(LocalDateTime.now());
+        vo.setUpdateTime(LocalDateTime.now());
+        return vo;
     }
 
     private ProjectVO sampleProjectVO(Long id) {

@@ -61,6 +61,36 @@ class ExtractionPromptBuilderTest {
         assertThat(feedback).contains("错误类型[FORMAT]");
     }
 
+    // ==================== Phase 4：溯源引用（软依赖） ====================
+
+    /**
+     * 片段编号：每个片段前置 [C{n}] 编号行，n 按列表顺序从 1 递增（与
+     * FieldExtractorServiceImpl.buildMarkerIndex 映射规则一致）。
+     */
+    @Test
+    void buildUserPrompt_prefixesChunksWithCMarkers() {
+        String prompt = builder.buildUserPrompt(List.of(
+                new org.springframework.ai.document.Document("片段一内容"),
+                new org.springframework.ai.document.Document("片段二内容")));
+
+        assertThat(prompt).contains("[C1]\n片段一内容");
+        assertThat(prompt).contains("[C2]\n片段二内容");
+    }
+
+    /**
+     * sources 软依赖指令：footer 明确旁路键语义与"缺失不影响抽取"，
+     * 不得将 sources 写成必返要求（补充约束 6）。
+     */
+    @Test
+    void buildUserPrompt_mentionsSourcesAsOptionalSideChannel() {
+        String prompt = builder.buildUserPrompt(
+                List.of(new org.springframework.ai.document.Document("片段内容")));
+
+        assertThat(prompt).contains("\"sources\"");
+        assertThat(prompt).contains("C2");
+        assertThat(prompt).contains("缺失不影响抽取结果本身");
+    }
+
     // ==================== 测试数据 ====================
 
     private FormFieldVO field(String code, FieldType type, boolean required, String name) {

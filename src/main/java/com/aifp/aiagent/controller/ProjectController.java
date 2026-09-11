@@ -2,6 +2,7 @@ package com.aifp.aiagent.controller;
 
 import com.aifp.aiagent.common.Result;
 import com.aifp.aiagent.dto.*;
+import com.aifp.aiagent.service.ProjectFormService;
 import com.aifp.aiagent.service.ProjectService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -23,6 +24,7 @@ import org.springframework.web.bind.annotation.*;
 public class ProjectController {
 
     private final ProjectService projectService;
+    private final ProjectFormService projectFormService;
 
     /**
      * 创建项目
@@ -94,5 +96,32 @@ public class ProjectController {
                                        @PathVariable Long fileId) {
         projectService.dissociateFile(id, fileId);
         return Result.success();
+    }
+
+    /**
+     * 绑定表单到项目（同项目同表单唯一，重复绑定拒绝）
+     */
+    @PostMapping("/{id}/form")
+    public Result<Long> bindForm(@PathVariable Long id,
+                                 @Valid @RequestBody ProjectFormCreateDTO dto) {
+        return Result.success(projectFormService.createProjectForm(id, dto));
+    }
+
+    /**
+     * 分页查询项目下的表单实例（按创建时间倒序）
+     */
+    @GetMapping("/{id}/forms")
+    public Result<PageResult<ProjectFormVO>> forms(@PathVariable Long id,
+                                                   @Valid PageQuery query) {
+        return Result.success(projectFormService.listProjectForms(id, query));
+    }
+
+    /**
+     * 查询项目表单实例详情（实例不存在或归属其他项目时按不存在处理）
+     */
+    @GetMapping("/{id}/form/{projectFormId}")
+    public Result<ProjectFormVO> form(@PathVariable Long id,
+                                      @PathVariable Long projectFormId) {
+        return Result.success(projectFormService.getProjectForm(id, projectFormId));
     }
 }

@@ -57,16 +57,19 @@ public class FieldSchemaValidator {
      */
     public ValidationResult validate(Map<String, Object> raw, List<FormFieldVO> fields) {
         Map<String, Object> coerced = new LinkedHashMap<>();
+        Map<String, Object> raws = new LinkedHashMap<>();
         List<FieldError> errors = new ArrayList<>();
         for (FormFieldVO f : fields) {
             Object v = raw == null ? null : raw.get(f.getFieldCode());
+            // raw 快照与 coerced 同键集合（含 null）：LLM 原始返回值，供 rawValue 落库
+            raws.put(f.getFieldCode(), v);
             if (v == null) {
                 handleMissing(f, coerced, errors);
                 continue;
             }
             coerceSafely(f, v, coerced, errors);
         }
-        return new ValidationResult(coerced, errors);
+        return new ValidationResult(coerced, raws, errors);
     }
 
     private void handleMissing(FormFieldVO f, Map<String, Object> coerced, List<FieldError> errors) {
@@ -174,12 +177,19 @@ public class FieldSchemaValidator {
     }
 
     /**
-     * 校验结果（内部传递用），含类型化值与字段错误。
+     * 校验结果（内部传递用），含类型化值、LLM 原始值快照与字段错误。
      */
     @Data
     @RequiredArgsConstructor
     public static class ValidationResult {
         private final Map<String, Object> coerced;
+
+        /**
+         * LLM 原始返回值快照（coerce 前，key=fieldCode，与 coerced 同键集合含 null），
+         * 供抽取链路落库 rawValue（Phase 4）与错误归因。
+         */
+        private final Map<String, Object> raws;
+
         private final List<FieldError> errors;
 
         public boolean hasErrors() {

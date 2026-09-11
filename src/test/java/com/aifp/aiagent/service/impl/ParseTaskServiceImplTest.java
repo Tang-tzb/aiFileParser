@@ -76,7 +76,7 @@ class ParseTaskServiceImplTest {
         TaskProgress initial = captor.getValue();
         assertThat(initial.getStatus()).isEqualTo("PARSING");
         assertThat(initial.getPercent()).isZero();
-        verify(asyncParseExecutor).run(eq(vo.getTaskId()), eq(FORM_ID), eq(FILE_ID));
+        verify(asyncParseExecutor).run(eq(vo.getTaskId()), isNull(), eq(FORM_ID), eq(FILE_ID));
         verifyNoInteractions(projectService);
     }
 
@@ -93,7 +93,8 @@ class ParseTaskServiceImplTest {
 
         assertThat(vo.getTaskId()).isNotBlank();
         verify(projectService).getProjectById(PROJECT_ID);
-        verify(asyncParseExecutor).run(anyString(), eq(FORM_ID), eq(FILE_ID));
+        // projectId 穿透（需求 §十）：异步链路收到项目归属
+        verify(asyncParseExecutor).run(anyString(), eq(PROJECT_ID), eq(FORM_ID), eq(FILE_ID));
     }
 
     /**
@@ -110,7 +111,7 @@ class ParseTaskServiceImplTest {
                         assertThat(e.getCode()).isEqualTo(ResultCode.PROJECT_FILE_NOT_IN_PROJECT.getCode()));
 
         verify(progressPublisher, never()).publish(any());
-        verify(asyncParseExecutor, never()).run(anyString(), anyLong(), anyLong());
+        verify(asyncParseExecutor, never()).run(anyString(), any(), any(), any());
     }
 
     /**
@@ -128,7 +129,7 @@ class ParseTaskServiceImplTest {
                         assertThat(e.getCode()).isEqualTo(ResultCode.PROJECT_NOT_FOUND.getCode()));
 
         verify(progressPublisher, never()).publish(any());
-        verify(asyncParseExecutor, never()).run(anyString(), anyLong(), anyLong());
+        verify(asyncParseExecutor, never()).run(anyString(), any(), any(), any());
     }
 
     @Test
@@ -139,7 +140,7 @@ class ParseTaskServiceImplTest {
                 .isInstanceOf(BusinessException.class)
                 .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo(5001));
         verify(progressPublisher, never()).publish(any());
-        verify(asyncParseExecutor, never()).run(anyString(), anyLong(), anyLong());
+        verify(asyncParseExecutor, never()).run(anyString(), any(), any(), any());
     }
 
     @Test
@@ -151,7 +152,7 @@ class ParseTaskServiceImplTest {
                 .isInstanceOf(BusinessException.class)
                 .satisfies(ex -> assertThat(((BusinessException) ex).getCode()).isEqualTo(2004));
         verify(progressPublisher, never()).publish(any());
-        verify(asyncParseExecutor, never()).run(anyString(), anyLong(), anyLong());
+        verify(asyncParseExecutor, never()).run(anyString(), any(), any(), any());
     }
 
     // ==================== 测试数据 ====================

@@ -49,7 +49,8 @@ public class ParseTaskServiceImpl implements ParseTaskService {
 
         String taskId = UUID.randomUUID().toString();
         publishInitial(taskId, formId, fileId);
-        asyncParseExecutor.run(taskId, formId, fileId);
+        // projectId 穿透（需求 §十）：异步链路保持项目归属，抽取成功后持久化到项目域
+        asyncParseExecutor.run(taskId, projectId, formId, fileId);
         log.info("异步任务已创建 taskId={}, projectId={}, formId={}, fileId={}",
                 taskId, projectId, formId, fileId);
         return new TaskStartVO(taskId, fileId, formId, LocalDateTime.now());

@@ -52,6 +52,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class FileControllerTest {
 
     private static final Long FILE_ID = 1785800001L;
+    private static final Long PROJECT_ID = 1785900001L;
     private final ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
     private MockMvc mockMvc;
     @Mock
@@ -185,17 +186,20 @@ class FileControllerTest {
         MockMultipartFile file = new MockMultipartFile(
                 "file", "项目申报书.pdf", MediaType.APPLICATION_PDF_VALUE, "fake-pdf".getBytes());
 
-        when(fileService.upload(any(MultipartFile.class), eq(null)))
-                .thenReturn(buildVO(FileType.PDF, "项目申报书.pdf"));
+        // mock 的 VO 须携带 projectId，与 service 透传行为一致（Controller 不二次加工返回值）
+        FileUploadVO vo = buildVO(FileType.PDF, "项目申报书.pdf");
+        vo.setProjectId(PROJECT_ID);
+        when(fileService.upload(any(MultipartFile.class), eq(PROJECT_ID)))
+                .thenReturn(vo);
 
         mockMvc.perform(multipart("/file/upload").file(file)
-                        .param("projectId", String.valueOf(null)))
+                        .param("projectId", String.valueOf(PROJECT_ID)))
                 .andDo(print())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(200))
-                .andExpect(jsonPath("$.data.projectId").value(String.valueOf(null)));
+                .andExpect(jsonPath("$.data.projectId").value(String.valueOf(PROJECT_ID)));
 
-        verify(fileService).upload(any(MultipartFile.class), eq(null));
+        verify(fileService).upload(any(MultipartFile.class), eq(PROJECT_ID));
     }
 
     private FileUploadVO buildVO(FileType type, String fileName) {
