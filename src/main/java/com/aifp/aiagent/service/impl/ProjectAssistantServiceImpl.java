@@ -22,17 +22,20 @@ import org.springframework.stereotype.Service;
 import java.util.*;
 
 /**
- * 项目助手服务实现（需求 §二十八编排式流程，Phase 8 版）
+ * 项目助手服务实现（需求 §二十八编排式流程；Phase 9 增加会话隔离）
  * <p>
- * 执行序：参数防御 → ProjectService 守门（403/6001 唯一入口）→
- * QueryIntentAnalyzer（第一次 LLM，轻量：仅 projectName+question）→
- * UNSUPPORTED 短路（零 LLM 零检索，追加约束 5）→ QueryPlanner 按
- * AssistantQueryPlan 拉取 结构化事实/项目 RAG/文件清单 → AssistantPromptBuilder
- * （反伪造 System Prompt）→ ChatModel 最终回答（纯自然语言）→ 组装响应。
+ * 执行序：参数防御 → ProjectService 守门（403/6001 唯一入口，权限前置——
+ * 守门通过前零 Redis 访问）→ 会话历史读取（ConversationHistoryStore，降级安全）→
+ * QueryIntentAnalyzer（第一次 LLM：意图 + 指代消解改写，仅注入历史用户问题）→
+ * UNSUPPORTED 短路（零 LLM 零检索）→ QueryPlanner 按 AssistantQueryPlan 拉取
+ * 结构化事实/项目 RAG（query=standaloneQuestion）/文件清单 → AssistantPromptBuilder
+ * （反伪造 System Prompt + 对话历史段）→ ChatModel 最终回答 → 组装 Response →
+ * appendTurn（后置：写失败不影响已生成的回答）。
  * <p>
- * 硬边界：不解析业务数字（追加约束 10）；不读 ChatMemory（追加约束 8）；
- * 不直查 Mapper（Phase 7 约束 3）；引用为"可使用的证据集合"而非 LLM 实际引用
- * （追加约束 3，Phase 11 精修 citation）。
+ * 硬边界：不解析业务数字（追加约束 10）；不直查 Mapper（Phase 7 约束 3）；
+ * 历史不是事实来源——项目事实每轮必须重新从本次 ProjectQueryService/
+ * ProjectRetrievalService 拉取（Phase 9 追加约束 1）；引用为"可使用的证据集合"
+ * 而非 LLM 实际引用（追加约束 3，Phase 11 精修 citation）。
  *
  * @author Tang_tzb
  */
@@ -55,6 +58,7 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     private final QueryPlanner queryPlanner;
     private final AssistantPromptBuilder promptBuilder;
     private final ChunkMetadataReader chunkMetadataReader;
+    private final ConversationHistoryStore conversationHistoryStore;
     private final ChatModel chatModel;
 
     /**
@@ -63,6 +67,13 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     @Value("${assistant.retrieve.topK:5}")
     private int assistantTopK;
 
+    /**
+     * 注入意图识别/回答 Prompt 的最近轮次（追加约束 3：与 Redis 存储侧
+     * max-stored-turns 相互独立，禁止把存储的 20 轮全量塞给 LLM）
+     */
+    @Value("${assistant.conversation.max-injected-turns:6}")
+    private int maxInjectedTurns;
+
     @Override
     public AssistantChatResponse chat(Long projectId, AssistantChatRequest request) {
         // 参数防御（@NotBlank 之外的兜底，直调场景可达）
@@ -70,32 +81,48 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
             throw new BusinessException(ResultCode.PARAM_ERROR, "提问内容不能为空");
         }
         String conversationId = resolveConversationId(request.getConversationId());
-        // 权限/存在性守门唯一入口（403/6001）；projectName 仅消歧语境（追加约束 13）
+        // 权限/存在性守门唯一入口（403/6001）；守门通过前零 Redis 访问（追加约束 6）
         ProjectVO project = projectService.getProjectById(projectId);
-        AssistantIntent intent = queryIntentAnalyzer.analyze(request.getMessage(), project.getProjectName());
+        // 会话历史（守门后读取，Redis 异常降级无历史）：时间顺序，最近一轮在最后（追加约束 3）
+        List<ConversationTurn> history = conversationHistoryStore
+                .loadRecentTurns(projectId, conversationId, maxInjectedTurns);
+        List<String> recentQuestions = history.stream()
+                .map(ConversationTurn::getUserQuestion).toList();
+        AssistantIntentAnalysis analysis = queryIntentAnalyzer
+                .analyze(request.getMessage(), project.getProjectName(), recentQuestions);
         // UNSUPPORTED 真短路（追加约束 5/14）：意图识别后立即返回，禁止任何检索/事实查询
-        if (intent == AssistantIntent.UNSUPPORTED) {
-            return buildUnsupportedResponse(projectId, conversationId);
+        if (analysis.getIntent() == AssistantIntent.UNSUPPORTED) {
+            AssistantChatResponse response = buildUnsupportedResponse(projectId, conversationId);
+            // 追加约束 5：只记录真实交互（assistantAnswer=实际返回的固定文案）
+            conversationHistoryStore.appendTurn(projectId, conversationId,
+                    request.getMessage(), response.getAnswer());
+            return response;
         }
-        return answer(projectId, conversationId, request.getMessage(), project.getProjectName(), intent);
+        return answer(projectId, conversationId, request.getMessage(),
+                project.getProjectName(), analysis, history);
     }
 
     // ==================== 内部方法 ====================
 
     /**
-     * 执行回答主链路：按计划拉数 → 组装 Context → 第二次 LLM → 响应组装。
+     * 执行回答主链路：按计划拉数 → 组装 Context → 第二次 LLM → 响应组装 →
+     * 会话记录（后置）。
      */
     private AssistantChatResponse answer(Long projectId, String conversationId, String message,
-                                         String projectName, AssistantIntent intent) {
-        AssistantQueryPlan plan = queryPlanner.buildPlan(intent);
+                                         String projectName, AssistantIntentAnalysis analysis,
+                                         List<ConversationTurn> history) {
+        // 追加约束 2：standaloneQuestion 是本轮唯一有效问题，RAG query 与 Prompt 用户问题共用
+        String effectiveQuestion = analysis.getStandaloneQuestion();
+        AssistantQueryPlan plan = queryPlanner.buildPlan(analysis.getIntent());
         ProjectStructuredFactsVO facts = plan.isFetchFacts()
                 ? projectQueryService.queryProjectFacts(projectId) : null;
         List<Document> documents = plan.isFetchRag()
-                ? projectRetrievalService.retrieve(projectId, message, assistantTopK) : List.of();
+                ? projectRetrievalService.retrieve(projectId, effectiveQuestion, assistantTopK) : List.of();
         List<String> fileNames = plan.isFetchFiles() ? fetchFileNames(projectId) : List.of();
         ProjectAssistantContext ctx = ProjectAssistantContext.builder()
                 .projectName(projectName)
-                .question(message)
+                .question(effectiveQuestion)
+                .history(history)
                 .facts(facts)
                 .documents(documents)
                 .fileNames(fileNames)
@@ -105,9 +132,11 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
                 .build();
         String answerText = generateAnswer(ctx);
         AssistantChatResponse response = assembleResponse(projectId, conversationId, answerText, ctx);
-        log.info("项目助手问答完成 projectId={}, intent={}, facts={}, rag={}, files={}, references={}",
-                projectId, intent, facts != null, plan.isFetchRag(), plan.isFetchFiles(),
-                response.getReferences().size());
+        // 追加约束 4：appendTurn 后置——Response 已构造完成，Redis 写失败仅 warn 不影响返回
+        conversationHistoryStore.appendTurn(projectId, conversationId, message, answerText);
+        log.info("项目助手问答完成 projectId={}, intent={}, history={}, facts={}, rag={}, files={}, references={}",
+                projectId, analysis.getIntent(), history.size(), facts != null, plan.isFetchRag(),
+                plan.isFetchFiles(), response.getReferences().size());
         return response;
     }
 
@@ -209,7 +238,8 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
 
     /**
      * UNSUPPORTED 确定性响应（追加约束 14 文案明确）：零 LLM 零检索，仅用于
-     * 告知能力边界，不产生任何证据项。
+     * 告知能力边界，不产生任何证据项；文案即实际返回内容，供 chat() 记入历史
+     * （追加约束 5）。
      */
     private AssistantChatResponse buildUnsupportedResponse(Long projectId, String conversationId) {
         AssistantChatResponse response = new AssistantChatResponse();
@@ -220,7 +250,9 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     }
 
     /**
-     * conversationId 处理：空白生成 UUID，非空透传（Phase 8 不读 ChatMemory）。
+     * conversationId 处理：空白生成 UUID，非空透传。
+     * Phase 9 语义：真正会话标识，配合 projectId 构成隔离键
+     * assistant:{projectId}:{conversationId}（历史读写均经 ConversationHistoryStore）。
      */
     private String resolveConversationId(String conversationId) {
         return conversationId == null || conversationId.isBlank()

@@ -12,11 +12,12 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@link AssistantPromptBuilder} 测试（离线，Phase 8 T3）
+ * {@link AssistantPromptBuilder} 测试（离线；Phase 8 T3 / Phase 9 历史段扩展）
  * <p>
  * 覆盖：System Prompt 反伪造关键规则（追加约束 1 原文、冲突不裁决、无依据话术、
- * rawValue/normalizedValue 规则、纯自然语言）；User Prompt 分段渲染（冲突字段显式
- * 标记 + 逐来源明细、[D{n}] 编号、空段整段省略、文件清单）。
+ * rawValue/normalizedValue 规则、纯自然语言、Phase 9 追加约束 1 历史非事实源）；
+ * User Prompt 分段渲染（对话历史、冲突字段显式标记 + 逐来源明细、[D{n}] 编号、
+ * 空段整段省略、文件清单）。
  *
  * @author Tang_tzb
  */
@@ -53,7 +54,57 @@ class AssistantPromptBuilderTest {
                 .contains("不属于当前项目资料范围")
                 .contains("当前版本暂不支持")
                 // 追加约束 12：纯自然语言
-                .contains("禁止输出 JSON");
+                .contains("禁止输出 JSON")
+                // Phase 9 追加约束 1：历史非事实源（即使上轮已回答过也要重新取依据）
+                .contains("对话历史仅用于理解当前问题的指代关系")
+                .contains("不能作为本次回答的依据");
+    }
+
+    // ==================== User Prompt：对话历史段（Phase 9） ====================
+
+    /**
+     * 有历史：【对话历史】段渲染于头部之后、事实段之前（时间顺序最近一轮最后），
+     * 逐轮"用户：/助手："呈现
+     */
+    @Test
+    void userPrompt_historyRenderedBetweenHeaderAndFacts() {
+        ProjectAssistantContext ctx = ProjectAssistantContext.builder()
+                .projectName("示范项目")
+                .question("那建筑面积呢？")
+                .history(List.of(
+                        turn("这个项目总投资是多少？", "总投资约100万元。"),
+                        turn("项目有哪些文件？", "共有2个文件：预算说明书.pdf、可研报告.pdf。")))
+                .facts(factsWithConflict())
+                .factsUsed(true)
+                .build();
+
+        String user = builder.buildUserPrompt(ctx);
+
+        int historyIndex = user.indexOf("【对话历史】");
+        int factsIndex = user.indexOf("【项目结构化字段事实】");
+        assertThat(historyIndex).isGreaterThan(0).isLessThan(factsIndex);
+        assertThat(user)
+                .contains("（仅用于理解当前问题的指代关系，不是项目事实来源）")
+                .contains("用户：这个项目总投资是多少？")
+                .contains("助手：总投资约100万元。")
+                .contains("用户：项目有哪些文件？")
+                .contains("助手：共有2个文件：预算说明书.pdf、可研报告.pdf。");
+        // 时间顺序：第二轮（最近）在第一轮之后
+        assertThat(user.indexOf("项目有哪些文件？")).isGreaterThan(user.indexOf("这个项目总投资是多少？"));
+    }
+
+    /**
+     * 无历史（首轮）：历史段整段省略
+     */
+    @Test
+    void userPrompt_emptyHistoryOmitted() {
+        ProjectAssistantContext ctx = ProjectAssistantContext.builder()
+                .projectName("示范项目").question("问题")
+                .build();
+
+        String user = builder.buildUserPrompt(ctx);
+
+        assertThat(user).doesNotContain("【对话历史】");
     }
 
     // ==================== User Prompt：分段渲染 ====================
@@ -221,5 +272,16 @@ class AssistantPromptBuilderTest {
                 "fileId", fileId,
                 "fileName", fileName,
                 "pageStart", pageStart));
+    }
+
+    /**
+     * Phase 9 对话轮次构造
+     */
+    private ConversationTurn turn(String question, String answer) {
+        return ConversationTurn.builder()
+                .userQuestion(question)
+                .assistantAnswer(answer)
+                .createTime(java.time.LocalDateTime.now())
+                .build();
     }
 }

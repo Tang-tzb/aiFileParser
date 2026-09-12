@@ -32,9 +32,18 @@ public class ProjectAssistantContext {
     private final String projectName;
 
     /**
-     * 用户问题原文（RAG query 与 Prompt 共用同一份原文，不做改写）
+     * 用户问题（Phase 9：standaloneQuestion 改写后独立问题——本轮唯一有效问题，
+     * RAG query 与 Prompt 共用；原始 message 仅入对话历史，追加约束 2）
      */
     private final String question;
+
+    /**
+     * 对话历史（最近 N 轮，时间顺序最近一轮在最后；首轮为空集合）。
+     * 仅用于指代消解（追加约束 1）：历史不是项目事实来源，事实必须来自
+     * 本次拉取的 facts/documents
+     */
+    @Builder.Default
+    private final List<ConversationTurn> history = List.of();
 
     /**
      * 项目结构化事实（未拉取时为 null；拉取后整体注入，含冲突标记）

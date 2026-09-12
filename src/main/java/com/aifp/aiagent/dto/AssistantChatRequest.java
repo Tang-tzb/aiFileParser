@@ -7,11 +7,12 @@ import java.io.Serial;
 import java.io.Serializable;
 
 /**
- * 项目助手对话请求（需求 §十三）
+ * 项目助手对话请求（需求 §十三；Phase 9 会话隔离生效）
  * <p>
- * Phase 8 会话无状态（用户确认 + 追加约束 8）：{@code conversationId} 仅透传
- * （空白时服务端生成），不读取 ChatMemory、不注入历史——追问（如"那建筑面积呢？"）
- * 不能依赖上一问上下文，会话隔离与历史记忆属 Phase 9。
+ * Phase 9：{@code conversationId} 为真正会话标识——配合路径 projectId 构成隔离键
+ * {@code assistant:{projectId}:{conversationId}}（§三十三），同一 conversationId
+ * 跨 projectId 必然是不同会话；服务端注入最近 N 轮历史用于指代消解，
+ * 历史不是项目事实来源（事实每轮重新拉取）。
  *
  * @author Tang_tzb
  */
@@ -22,7 +23,9 @@ public class AssistantChatRequest implements Serializable {
     private static final long serialVersionUID = 1L;
 
     /**
-     * 会话 ID（可选；空白时服务端自动生成 UUID 并随响应返回）
+     * 会话 ID（可选；空白时服务端自动生成 UUID 并随响应返回）。
+     * 仅在相同 projectId 下代表同一会话；携带其他项目的 conversationId 不会
+     * 读到该项目的历史（隔离键含 projectId）
      */
     private String conversationId;
 

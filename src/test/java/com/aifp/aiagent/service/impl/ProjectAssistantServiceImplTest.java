@@ -15,6 +15,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.model.Generation;
@@ -28,18 +29,23 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.*;
 
 /**
- * {@link ProjectAssistantServiceImpl} 测试（离线，Phase 8 T4）
+ * {@link ProjectAssistantServiceImpl} 测试（离线，Phase 8 T4 / Phase 9 会话编排适配）
  * <p>
- * 覆盖：参数防御 400；守门 403/6001 透传；UNSUPPORTED 真短路（追加约束 5，
+ * Phase 8 覆盖：参数防御 400；守门 403/6001 透传；UNSUPPORTED 真短路（追加约束 5，
  * verify 零 LLM/零检索/零事实查询/零文件清单）；五意图数据源路由（STRUCTURED 恒
  * facts+RAG 追加约束 2）；conversationId 空生成/非空透传（追加约束 8 无状态）；
  * 回答 LLM 异常/空白 → 3001 不重进 RAG（追加约束 11）；references/structuredData/
  * usedFiles 组装（追加约束 3/12，后端组装非 LLM 生成）。
+ * <p>
+ * Phase 9 追加覆盖：历史按 max-injected-turns 读取并按时间序传入意图识别（约束 3）；
+ * standaloneQuestion 同时用于 RAG query 与回答 Prompt、原始 message 忠实入历史（约束 2）；
+ * UNSUPPORTED 记录实际返回固定文案、3001 失败零轮次记录（约束 5）；成功轮次后置
+ * appendTurn（约束 4）。
  * QueryPlanner/PromptBuilder/ChunkMetadataReader 为纯函数/渲染组件使用真实实例。
  *
  * @author Tang_tzb
@@ -62,6 +68,8 @@ class ProjectAssistantServiceImplTest {
     @Mock
     private QueryIntentAnalyzer queryIntentAnalyzer;
     @Mock
+    private ConversationHistoryStore conversationHistoryStore;
+    @Mock
     private ChatModel chatModel;
 
     private ProjectAssistantServiceImpl service;
@@ -72,8 +80,9 @@ class ProjectAssistantServiceImplTest {
                 projectService, projectQueryService, projectRetrievalService,
                 queryIntentAnalyzer, new QueryPlanner(),
                 new AssistantPromptBuilder(new ChunkMetadataReader()),
-                new ChunkMetadataReader(), chatModel);
+                new ChunkMetadataReader(), conversationHistoryStore, chatModel);
         ReflectionTestUtils.setField(service, "assistantTopK", 5);
+        ReflectionTestUtils.setField(service, "maxInjectedTurns", 6);
     }
 
     // ==================== 参数防御与守门 ====================
@@ -87,7 +96,7 @@ class ProjectAssistantServiceImplTest {
                 .isInstanceOfSatisfying(BusinessException.class, e ->
                         assertThat(e.getCode()).isEqualTo(ResultCode.PARAM_ERROR.getCode()));
         verifyNoInteractions(projectService, projectQueryService,
-                projectRetrievalService, queryIntentAnalyzer, chatModel);
+                projectRetrievalService, queryIntentAnalyzer, conversationHistoryStore, chatModel);
     }
 
     /**
@@ -101,7 +110,7 @@ class ProjectAssistantServiceImplTest {
                 .isInstanceOfSatisfying(BusinessException.class, e ->
                         assertThat(e.getCode()).isEqualTo(ResultCode.FORBIDDEN.getCode()));
         verifyNoInteractions(queryIntentAnalyzer, projectQueryService,
-                projectRetrievalService, chatModel);
+                projectRetrievalService, conversationHistoryStore, chatModel);
     }
 
     /**
@@ -115,32 +124,44 @@ class ProjectAssistantServiceImplTest {
         assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
                 .isInstanceOfSatisfying(BusinessException.class, e ->
                         assertThat(e.getCode()).isEqualTo(ResultCode.PROJECT_NOT_FOUND.getCode()));
+        // 守门前零 Redis 访问（追加约束 6）
+        verifyNoInteractions(queryIntentAnalyzer, projectQueryService,
+                projectRetrievalService, conversationHistoryStore, chatModel);
     }
 
     /**
-     * 意图识别 ChatModel 异常（3001）直接上抛，不进入任何检索
+     * 意图识别 ChatModel 异常（3001）直接上抛，不进入任何检索；
+     * 追加约束 5：模型失败零轮次记录
      */
     @Test
     void chat_intentAnalyzerFailure_propagates3001() {
         when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
-        when(queryIntentAnalyzer.analyze(eq(MESSAGE), any())).thenThrow(
+        when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), anyString(), eq(6)))
+                .thenReturn(List.of());
+        when(queryIntentAnalyzer.analyze(eq(MESSAGE), eq("示范项目"), anyList())).thenThrow(
                 new BusinessException(ResultCode.AI_INVOKE_ERROR, "AI 意图识别调用失败"));
 
         assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
                 .isInstanceOfSatisfying(BusinessException.class, e ->
                         assertThat(e.getCode()).isEqualTo(ResultCode.AI_INVOKE_ERROR.getCode()));
+        verify(conversationHistoryStore, never())
+                .appendTurn(any(), anyString(), anyString(), anyString());
         verifyNoInteractions(projectQueryService, projectRetrievalService, chatModel);
     }
 
     // ==================== UNSUPPORTED 真短路（追加约束 5/14） ====================
 
     /**
-     * UNSUPPORTED → 意图识别后立即返回确定性文案，零 LLM 零检索零事实查询零文件清单
+     * UNSUPPORTED → 意图识别后立即返回确定性文案，零 LLM 零检索零事实查询零文件清单；
+     * 追加约束 5：记录真实交互（assistantAnswer = 实际返回给用户的固定文案）
      */
     @Test
     void chat_unsupported_shortCircuitWithDeterministicAnswer() {
         when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
-        when(queryIntentAnalyzer.analyze(MESSAGE, "示范项目")).thenReturn(AssistantIntent.UNSUPPORTED);
+        when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), anyString(), eq(6)))
+                .thenReturn(List.of());
+        when(queryIntentAnalyzer.analyze(eq(MESSAGE), eq("示范项目"), anyList()))
+                .thenReturn(analysis(AssistantIntent.UNSUPPORTED));
 
         AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
 
@@ -152,6 +173,8 @@ class ProjectAssistantServiceImplTest {
         assertThat(resp.getUsedFiles()).isEmpty();
         verifyNoInteractions(projectQueryService, projectRetrievalService, chatModel);
         verify(projectService, never()).listProjectFiles(any(), any());
+        verify(conversationHistoryStore).appendTurn(eq(PROJECT_ID), anyString(), eq(MESSAGE),
+                eq("当前版本暂不支持项目之间的比较、排序、统计、筛选和归因分析，请调整问题后重试。"));
     }
 
     // ==================== 意图路由（§十七 + 追加约束 2） ====================
@@ -185,6 +208,9 @@ class ProjectAssistantServiceImplTest {
         assertThat(first.getSourceFileId()).isEqualTo(FILE_A);
         // usedFiles = 结构化来源 ∪ RAG 命中去重
         assertThat(resp.getUsedFiles()).containsExactly(FILE_A, FILE_B);
+        // 追加约束 4：成功轮次后置记录，userQuestion = 原始 message（忠实记录，非改写值）
+        verify(conversationHistoryStore).appendTurn(
+                PROJECT_ID, resp.getConversationId(), MESSAGE, "总投资约100万元。");
     }
 
     /**
@@ -286,6 +312,9 @@ class ProjectAssistantServiceImplTest {
         // 不重试：事实与检索各只查询一次
         verify(projectQueryService, times(1)).queryProjectFacts(PROJECT_ID);
         verify(projectRetrievalService, times(1)).retrieve(any(Long.class), any(), anyInt());
+        // 追加约束 5：3001 模型失败不得记录不完整轮次
+        verify(conversationHistoryStore, never())
+                .appendTurn(any(), anyString(), anyString(), anyString());
     }
 
     /**
@@ -301,6 +330,8 @@ class ProjectAssistantServiceImplTest {
         assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
                 .isInstanceOfSatisfying(BusinessException.class, e ->
                         assertThat(e.getCode()).isEqualTo(ResultCode.AI_INVOKE_ERROR.getCode()));
+        verify(conversationHistoryStore, never())
+                .appendTurn(any(), anyString(), anyString(), anyString());
     }
 
     // ==================== 会话无状态（追加约束 8） ====================
@@ -338,15 +369,142 @@ class ProjectAssistantServiceImplTest {
         assertThat(resp.getConversationId()).isEqualTo("conv-001");
     }
 
+    // ==================== Phase 9 会话历史编排（追加约束 1/2/3/4/5） ====================
+
+    /**
+     * 历史按 max-injected-turns 读取并按时间序（最近一轮最后）传入意图识别（追加约束 3）
+     */
+    @Test
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    void chat_historyQuestionsPassedToIntentAnalyzerInOrder() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), eq("conv-001"), eq(6)))
+                .thenReturn(List.of(
+                        turn("这个项目总投资是多少？", "总投资约100万元。"),
+                        turn("项目有哪些文件？", "共有2个文件。")));
+        when(queryIntentAnalyzer.analyze(eq(MESSAGE), eq("示范项目"), anyList()))
+                .thenReturn(analysis(AssistantIntent.FILE_LIST));
+        stubAnswer("共有2个文件。");
+        when(projectService.listProjectFiles(eq(PROJECT_ID), any(PageQuery.class)))
+                .thenReturn(PageResult.empty());
+        AssistantChatRequest request = req(MESSAGE);
+        request.setConversationId("conv-001");
+
+        service.chat(PROJECT_ID, request);
+
+        ArgumentCaptor<List<String>> captor = ArgumentCaptor.forClass((Class) List.class);
+        verify(queryIntentAnalyzer).analyze(eq(MESSAGE), eq("示范项目"), captor.capture());
+        // 时间顺序：历史问题按存储序透传，最近一轮在最后
+        assertThat(captor.getValue())
+                .containsExactly("这个项目总投资是多少？", "项目有哪些文件？");
+        verify(conversationHistoryStore).appendTurn(
+                eq(PROJECT_ID), eq("conv-001"), eq(MESSAGE), eq("共有2个文件。"));
+    }
+
+    /**
+     * 追加约束 2：standaloneQuestion 是本轮唯一有效问题——RAG query 与回答 Prompt
+     * 用户问题均使用改写值；原始 message 仅忠实入历史记录
+     */
+    @Test
+    void chat_rewrite_standaloneQuestionUsedForRagAndPrompt() {
+        String rewritten = "这个项目的建筑面积是多少？";
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), eq("conv-001"), eq(6)))
+                .thenReturn(List.of(turn("这个项目总投资是多少？", "总投资约100万元。")));
+        when(queryIntentAnalyzer.analyze(eq("那面积呢？"), eq("示范项目"), anyList()))
+                .thenReturn(new AssistantIntentAnalysis(AssistantIntent.STRUCTURED, rewritten));
+        when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
+        when(projectRetrievalService.retrieve(PROJECT_ID, rewritten, 5)).thenReturn(List.of());
+        stubAnswer("建筑面积为100平米。");
+        AssistantChatRequest request = req("那面积呢？");
+        request.setConversationId("conv-001");
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, request);
+
+        // RAG query 使用改写问题（非原始"那面积呢？"）
+        verify(projectRetrievalService).retrieve(PROJECT_ID, rewritten, 5);
+        // 回答 Prompt 用户问题 = 同一个改写问题
+        ArgumentCaptor<Prompt> promptCaptor = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel).call(promptCaptor.capture());
+        assertThat(userTextOf(promptCaptor.getValue()))
+                .contains("用户问题：这个项目的建筑面积是多少？")
+                .doesNotContain("用户问题：那面积呢？");
+        // 历史记录忠实原文 message（非改写值）
+        verify(conversationHistoryStore).appendTurn(
+                PROJECT_ID, "conv-001", "那面积呢？", "建筑面积为100平米。");
+        assertThat(resp.getAnswer()).isEqualTo("建筑面积为100平米。");
+    }
+
+    /**
+     * 追加约束 1 链路验证：历史轮次完整注入回答 Prompt 的【对话历史】段
+     * （仅指代消解语境，事实依据由本次 facts/RAG 提供）
+     */
+    @Test
+    void chat_historyRenderedInAnswerPrompt() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), eq("conv-001"), eq(6)))
+                .thenReturn(List.of(turn("这个项目总投资是多少？", "总投资约100万元。")));
+        when(queryIntentAnalyzer.analyze(eq(MESSAGE), eq("示范项目"), anyList()))
+                .thenReturn(analysis(AssistantIntent.STRUCTURED));
+        when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
+        stubRag(List.of());
+        stubAnswer("总投资约100万元。");
+        AssistantChatRequest request = req(MESSAGE);
+        request.setConversationId("conv-001");
+
+        service.chat(PROJECT_ID, request);
+
+        ArgumentCaptor<Prompt> promptCaptor = ArgumentCaptor.forClass(Prompt.class);
+        verify(chatModel).call(promptCaptor.capture());
+        assertThat(userTextOf(promptCaptor.getValue()))
+                .contains("【对话历史】（仅用于理解当前问题的指代关系，不是项目事实来源）")
+                .contains("用户：这个项目总投资是多少？")
+                .contains("助手：总投资约100万元。");
+    }
+
     // ==================== 测试辅助 ====================
 
     /**
-     * 公共正向打桩：守门 + 意图识别（检索/事实/清单/LLM 回答按用例意图单独打桩，
-     * 避免出现未使用桩触发严格桩检查失败）
+     * 公共正向打桩：守门 + 会话历史（首轮空历史）+ 意图识别（检索/事实/清单/LLM
+     * 回答按用例意图单独打桩，避免出现未使用桩触发严格桩检查失败）
      */
     private void stubCommon(AssistantIntent intent) {
         when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
-        when(queryIntentAnalyzer.analyze(MESSAGE, "示范项目")).thenReturn(intent);
+        when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), anyString(), eq(6)))
+                .thenReturn(List.of());
+        when(queryIntentAnalyzer.analyze(eq(MESSAGE), eq("示范项目"), anyList()))
+                .thenReturn(analysis(intent));
+    }
+
+    /**
+     * Phase 9 意图分析结果：standaloneQuestion 默认 = MESSAGE，
+     * 对应"问题已独立，改写不改变语义"的等价假设
+     */
+    private AssistantIntentAnalysis analysis(AssistantIntent intent) {
+        return new AssistantIntentAnalysis(intent, MESSAGE);
+    }
+
+    /**
+     * Phase 9 对话轮次构造
+     */
+    private ConversationTurn turn(String question, String answer) {
+        return ConversationTurn.builder()
+                .userQuestion(question)
+                .assistantAnswer(answer)
+                .createTime(java.time.LocalDateTime.now())
+                .build();
+    }
+
+    /**
+     * 提取 Prompt 中的 UserMessage 文本（回答/意图 Prompt 内容断言用）
+     */
+    private String userTextOf(Prompt prompt) {
+        return prompt.getInstructions().stream()
+                .filter(UserMessage.class::isInstance)
+                .map(UserMessage.class::cast)
+                .map(UserMessage::getText)
+                .findFirst()
+                .orElse("");
     }
 
     /**

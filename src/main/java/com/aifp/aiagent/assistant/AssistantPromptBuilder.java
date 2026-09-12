@@ -8,12 +8,13 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 
 /**
- * 项目助手回答 Prompt 构建器（需求 §二十二/§二十三）
+ * 项目助手回答 Prompt 构建器（需求 §二十二/§二十三；Phase 9 增加对话历史段）
  * <p>
- * System Prompt = 反伪造规则常量（追加约束 1/6/9/12/14 + 硬约束 ⑧ 冲突不裁决）；
- * User Prompt = 按上下文分段渲染（空段整段省略）：结构化字段事实（冲突显式标记 +
- * 逐来源明细）/ 项目文件清单 / 文档检索结果（[D{n}] 编号，与 ExtractionPromptBuilder
- * [C{n}] 同风格，修改编号语义需互相同步）。
+ * System Prompt = 反伪造规则常量（追加约束 1/6/9/12/14 + 硬约束 ⑧ 冲突不裁决 +
+ * Phase 9 追加约束 1 历史非事实源）；
+ * User Prompt = 按上下文分段渲染（空段整段省略）：对话历史（指代消解语境）/
+ * 结构化字段事实（冲突显式标记 + 逐来源明细）/ 项目文件清单 / 文档检索结果
+ * （[D{n}] 编号，与 ExtractionPromptBuilder [C{n}] 同风格，修改编号语义需互相同步）。
  * <p>
  * 职责边界（追加约束 10/12）：只做数据渲染，不解析业务数字、不组装响应 VO；
  * 回答保持纯自然语言，references/structuredData/usedFiles 全部由后端代码组装。
@@ -43,7 +44,8 @@ public class AssistantPromptBuilder {
             6. 引用文档内容时必须给出文件名和页码，便于用户核对。
             7. 与当前项目明显无关的问题，如实回答"不属于当前项目资料范围"，不要强行作答或编造。
             8. 涉及项目之间比较、排序、统计、筛选和归因分析的问题，如实说明当前版本暂不支持此类能力。
-            9. 只输出纯自然语言回答，禁止输出 JSON 或其他结构化格式。""";
+            9. 只输出纯自然语言回答，禁止输出 JSON 或其他结构化格式。
+            10. 对话历史仅用于理解当前问题的指代关系（如"那、它、这个项目、还有呢"）；历史中提到的项目事实（金额、面积、日期、单位等）不能作为本次回答的依据，即使上一轮已经回答过，本轮涉及项目事实时仍必须以本次提供的【项目结构化字段事实】和【文档检索结果】为准。""";
 
     private final ChunkMetadataReader chunkMetadataReader;
 
@@ -66,6 +68,7 @@ public class AssistantPromptBuilder {
         StringBuilder sb = new StringBuilder();
         sb.append("项目：").append(ctx.getProjectName()).append('\n');
         sb.append("用户问题：").append(ctx.getQuestion()).append('\n');
+        renderHistory(sb, ctx.getHistory());
         renderFacts(sb, ctx.getFacts());
         renderFileList(sb, ctx.getFileNames());
         renderDocuments(sb, ctx.getDocuments());
@@ -73,6 +76,22 @@ public class AssistantPromptBuilder {
     }
 
     // ==================== 内部方法 ====================
+
+    /**
+     * 渲染对话历史段（时间顺序，最近一轮在最后，追加约束 3）：
+     * 仅用于指代消解语境（追加约束 1，事实依据规则见 System Prompt 第 10 条）；
+     * 空历史整段省略。
+     */
+    private void renderHistory(StringBuilder sb, List<ConversationTurn> history) {
+        if (history == null || history.isEmpty()) {
+            return;
+        }
+        sb.append("\n【对话历史】（仅用于理解当前问题的指代关系，不是项目事实来源）\n");
+        for (ConversationTurn turn : history) {
+            sb.append("用户：").append(turn.getUserQuestion()).append('\n');
+            sb.append("助手：").append(turn.getAssistantAnswer()).append('\n');
+        }
+    }
 
     /**
      * 渲染结构化字段事实段：逐表单实例 → 逐字段；conflict=true 显式前置冲突标记

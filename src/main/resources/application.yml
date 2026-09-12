@@ -99,12 +99,19 @@ rag:
       max-attempts: ${RAG_EXTRACT_RETRY_MAX:2}
 
 # ============================================================
-# 项目助手参数（Phase 8：Project Assistant）
+# 项目助手参数（Phase 8：Project Assistant / Phase 9：会话隔离）
 # ============================================================
 assistant:
   retrieve:
     # 助手 RAG 检索条数（独立于抽取链 rag.retrieve.topK），默认 5
     topK: ${ASSISTANT_RETRIEVE_TOPK:5}
+  conversation:
+    # 会话历史 TTL（小时）；每次 append 后刷新，代表"最近活跃会话"存活时间，默认 24
+    history-ttl-hours: ${ASSISTANT_CONVERSATION_TTL_HOURS:24}
+    # Redis 中最多保留对话轮次（存储侧限长），默认 20
+    max-stored-turns: ${ASSISTANT_CONVERSATION_MAX_STORED:20}
+    # 注入意图识别/回答 Prompt 的最近轮次（上下文侧限长，与存储侧独立），默认 6
+    max-injected-turns: ${ASSISTANT_CONVERSATION_MAX_INJECTED:6}
 
 # ============================================================
 # 异步任务 + SSE 进度推送参数
