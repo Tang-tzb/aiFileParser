@@ -7,6 +7,8 @@ import com.aifp.aiagent.dto.PageResult;
 import com.aifp.aiagent.entity.enums.FileStatus;
 import org.springframework.web.multipart.MultipartFile;
 
+import java.util.List;
+
 /**
  * 文件管理服务
  * <p>
@@ -61,6 +63,18 @@ public interface FileService {
      * @return 分页结果
      */
     PageResult<FileRecordVO> pageByProject(Long projectId, PageQuery query);
+
+    /**
+     * 查询项目下全部文件ID（非分页，ID 升序）。
+     * <p>
+     * 供项目范围检索组装 fileId IN 兜底过滤（Phase 6）：历史 chunk（先入库后绑定项目）
+     * 无 projectId metadata，仅能经 fileId 命中。项目无文件时返回空列表。
+     * 实时查询当前 file_record.project_id，不缓存（约束 4：解绑后不得再被命中）。
+     *
+     * @param projectId 项目ID
+     * @return 文件ID列表（升序）
+     */
+    List<Long> listFileIdsByProject(Long projectId);
 
     /**
      * 将文件关联到项目（一个文件至多归属一个项目）。

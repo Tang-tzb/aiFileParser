@@ -12,7 +12,11 @@ import com.aifp.aiagent.repository.FileRecordMapper;
 import com.aifp.aiagent.repository.ProjectMapper;
 import com.aifp.aiagent.service.ProjectAccessService;
 import com.aifp.aiagent.service.storage.FileStorageService;
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -44,6 +48,17 @@ class FileServiceImplTest {
 
     private static final Long FILE_ID = 1785800001L;
     private static final Long PROJECT_ID = 1785900001L;
+
+    /**
+     * 离线初始化 MyBatis-Plus 实体元数据：LambdaQueryWrapper 的列解析需要实体
+     * TableInfo（生产环境由 Mapper 注册自动完成，测试需手动初始化）。
+     */
+    @BeforeAll
+    static void initEntityMetadata() {
+        MapperBuilderAssistant assistant =
+                new MapperBuilderAssistant(new MybatisConfiguration(), "");
+        TableInfoHelper.initTableInfo(assistant, FileRecord.class);
+    }
 
     @Mock
     private FileRecordMapper fileRecordMapper;
@@ -303,6 +318,35 @@ class FileServiceImplTest {
 
         assertThat(result.getTotal()).isEqualTo(1L);
         assertThat(result.getRecords()).hasSize(1);
+    }
+
+    // ==================== 项目文件ID非分页查询（Phase 6） ====================
+
+    /**
+     * listFileIdsByProject：映射记录主键为ID列表（升序由 SQL orderByAsc 保证）
+     */
+    @Test
+    void listFileIdsByProject_mapsRecordIds() {
+        FileRecord f1 = new FileRecord();
+        f1.setId(1785800001L);
+        FileRecord f2 = new FileRecord();
+        f2.setId(1785800002L);
+        when(fileRecordMapper.selectList(any(com.baomidou.mybatisplus.core.conditions.Wrapper.class)))
+                .thenReturn(List.of(f1, f2));
+
+        assertThat(fileService.listFileIdsByProject(PROJECT_ID))
+                .containsExactly(1785800001L, 1785800002L);
+    }
+
+    /**
+     * 项目无文件：返回空列表
+     */
+    @Test
+    void listFileIdsByProject_emptyProject_returnsEmptyList() {
+        when(fileRecordMapper.selectList(any(com.baomidou.mybatisplus.core.conditions.Wrapper.class)))
+                .thenReturn(List.of());
+
+        assertThat(fileService.listFileIdsByProject(PROJECT_ID)).isEmpty();
     }
 
     // ==================== 测试辅助 ====================

@@ -133,6 +133,18 @@ public class FileServiceImpl implements FileService {
     }
 
     @Override
+    public List<Long> listFileIdsByProject(Long projectId) {
+        // 非分页主键查询：仅供项目范围检索兜底过滤（Phase 6），实时读取当前绑定关系
+        return fileRecordMapper.selectList(new LambdaQueryWrapper<FileRecord>()
+                        .select(FileRecord::getId)
+                        .eq(FileRecord::getProjectId, projectId)
+                        .orderByAsc(FileRecord::getId))
+                .stream()
+                .map(FileRecord::getId)
+                .toList();
+    }
+
+    @Override
     @Transactional(rollbackFor = Exception.class)
     public void associateToProject(Long projectId, Long fileId) {
         FileRecord record = requireFile(fileId);
