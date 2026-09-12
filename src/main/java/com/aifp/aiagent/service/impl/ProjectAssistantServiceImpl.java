@@ -8,18 +8,23 @@ import com.aifp.aiagent.rag.ProjectRetrievalService;
 import com.aifp.aiagent.service.ProjectAssistantService;
 import com.aifp.aiagent.service.ProjectQueryService;
 import com.aifp.aiagent.service.ProjectService;
+import jakarta.annotation.Resource;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.document.Document;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.Executor;
+import java.util.function.Consumer;
 
 /**
  * 项目助手服务实现（需求 §二十八编排式流程；Phase 9 增加会话隔离）
@@ -30,9 +35,13 @@ import java.util.*;
  * UNSUPPORTED 短路（追加约束 5，Phase 10 文案收窄为归因分析）→ QueryPlanner 按
  * AssistantQueryPlan 拉取结构化事实/项目 RAG（query=standaloneQuestion）/文件清单 →
  * AssistantPromptBuilder.build（反伪造 System Prompt + 对话历史段 + Phase 11 证据
- * 编号登记，返回 PromptBuildResult）→ ChatModel 最终回答 → AnswerCitationParser
- * 确定性解析行内引用标记（只降级不报错）→ 组装 Response → appendTurn（后置：
- * 写失败不影响已生成的回答）。
+ * 编号登记，返回 PromptBuildResult）→ ChatModel 流式最终回答（delta 增量推送）→
+ * AnswerCitationParser 确定性解析行内引用标记（只降级不报错）→ 组装 Response →
+ * final 事件收尾 → appendTurn（后置：写失败不影响已生成的回答）。
+ * <p>
+ * Phase K 流式输出：守门同步完成后建立 SSE 连接（timeout 120s），编排提交
+ * assistantStreamExecutor 专用线程池异步执行；事件协议 delta/final/error，
+ * 任意异常以 error 事件 + complete 兜底收敛。
  * <p>
  * Phase 10 COMPARISON 分支：比较编排（槽位 LLM + 名称→ID + 确定性计算）先行，
  * 降级零后续 LLM 零检索；成功后 RAG 仅解释依据，比较证据并入 references/usedFiles/
@@ -71,6 +80,23 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     private final ChatModel chatModel;
 
     /**
+     * SSE 事件名（Phase K 流式协议）：delta=回答增量 / final=完整响应 / error=失败消息
+     */
+    private static final String EVENT_DELTA = "delta";
+    private static final String EVENT_FINAL = "final";
+    private static final String EVENT_ERROR = "error";
+    /**
+     * SSE 连接超时（毫秒）：LLM 流式 + 前置编排的最长生命周期
+     */
+    private static final long SSE_TIMEOUT_MILLIS = 120_000L;
+    /**
+     * 助手流式对话专用线程池（Phase K；@Resource 字段注入以指定 bean 名，
+     * 与 parseExecutor 隔离——LLM 流式任务 10~30s，防止双方互占）
+     */
+    @Resource(name = "assistantStreamExecutor")
+    private Executor assistantStreamExecutor;
+
+    /**
      * 助手 RAG 检索条数（独立于抽取链 rag.retrieve.topK）
      */
     @Value("${assistant.retrieve.topK:5}")
@@ -84,48 +110,82 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     private int maxInjectedTurns;
 
     @Override
-    public AssistantChatResponse chat(Long projectId, AssistantChatRequest request) {
-        // 参数防御（@NotBlank 之外的兜底，直调场景可达）
+    public SseEmitter chatStream(Long projectId, AssistantChatRequest request) {
+        // 参数防御（@NotBlank 之外的兜底，直调场景可达）——同步执行，失败走 HTTP JSON
         if (request.getMessage() == null || request.getMessage().isBlank()) {
             throw new BusinessException(ResultCode.PARAM_ERROR, "提问内容不能为空");
         }
         String conversationId = resolveConversationId(request.getConversationId());
-        // 权限/存在性守门唯一入口（403/6001）；守门通过前零 Redis 访问（追加约束 6）
+        // 权限/存在性守门唯一入口（403/6001）——同步执行，守门通过前零 Redis 访问（追加约束 6）
         ProjectVO project = projectService.getProjectById(projectId);
-        // 会话历史（守门后读取，Redis 异常降级无历史）：时间顺序，最近一轮在最后（追加约束 3）
-        List<ConversationTurn> history = conversationHistoryStore
-                .loadRecentTurns(projectId, conversationId, maxInjectedTurns);
-        List<String> recentQuestions = history.stream()
-                .map(ConversationTurn::getUserQuestion).toList();
-        AssistantIntentAnalysis analysis = queryIntentAnalyzer
-                .analyze(request.getMessage(), project.getProjectName(), recentQuestions);
-        // UNSUPPORTED 真短路（追加约束 5/14）：意图识别后立即返回，禁止任何检索/事实查询
-        if (analysis.getIntent() == AssistantIntent.UNSUPPORTED) {
-            AssistantChatResponse response = buildUnsupportedResponse(projectId, conversationId);
-            // 追加约束 5：只记录真实交互（assistantAnswer=实际返回的固定文案）
-            conversationHistoryStore.appendTurn(projectId, conversationId,
-                    request.getMessage(), response.getAnswer());
-            return response;
-        }
-        return answer(projectId, conversationId, request.getMessage(),
-                project.getProjectName(), analysis, history);
+
+        // 守门通过后建立 SSE 连接（timeout 120s），编排提交专用线程池异步执行
+        SseEmitter emitter = new SseEmitter(SSE_TIMEOUT_MILLIS);
+        emitter.onTimeout(emitter::complete);
+        emitter.onError(t -> log.debug("助手 SSE 连接异常 projectId={}: {}", projectId, t.getMessage()));
+        assistantStreamExecutor.execute(() ->
+                executeChatStream(emitter, projectId, conversationId,
+                        request.getMessage(), project.getProjectName()));
+        return emitter;
     }
 
     // ==================== 内部方法 ====================
 
     /**
-     * 执行回答主链路：按计划拉数 → 组装 Context → 第二次 LLM → 响应组装 →
-     * 会话记录（后置）。
+     * SSE 流式编排（Phase K，异步线程执行）：
+     * 历史读取 → 意图分析 → UNSUPPORTED 短路 / 比较分支 / 常规流式回答 →
+     * final/error 事件收尾。任意异常都以 error 事件 + complete 兜底，保证前端
+     * 占位消息总能收敛（不会永久"思考中"）。
+     */
+    protected void executeChatStream(SseEmitter emitter, Long projectId, String conversationId,
+                                     String message, String projectName) {
+        try {
+            // 会话历史（Redis 异常降级无历史）：时间顺序，最近一轮在最后（追加约束 3）
+            List<ConversationTurn> history = conversationHistoryStore
+                    .loadRecentTurns(projectId, conversationId, maxInjectedTurns);
+            List<String> recentQuestions = history.stream()
+                    .map(ConversationTurn::getUserQuestion).toList();
+            AssistantIntentAnalysis analysis = queryIntentAnalyzer
+                    .analyze(message, projectName, recentQuestions);
+            // delta 增量推送回调（常规路径与比较分支共用）
+            Consumer<String> onDelta = text -> sendEvent(emitter, EVENT_DELTA, Map.of("delta", text));
+
+            // UNSUPPORTED 真短路（追加约束 5/14）：意图识别后立即返回，禁止任何检索/事实查询
+            if (analysis.getIntent() == AssistantIntent.UNSUPPORTED) {
+                AssistantChatResponse response = buildUnsupportedResponse(projectId, conversationId);
+                // 追加约束 5：只记录真实交互（assistantAnswer=实际返回的固定文案）
+                conversationHistoryStore.appendTurn(projectId, conversationId,
+                        message, response.getAnswer());
+                sendEvent(emitter, EVENT_FINAL, response);
+                finish(emitter);
+                return;
+            }
+
+            AssistantChatResponse response = answer(projectId, conversationId, message,
+                    projectName, analysis, history, onDelta);
+            sendEvent(emitter, EVENT_FINAL, response);
+            finish(emitter);
+        } catch (BusinessException e) {
+            sendErrorAndFinish(emitter, e.getMessage());
+        } catch (Exception e) {
+            log.error("项目助手流式问答失败 projectId={}: {}", projectId, e.getMessage(), e);
+            sendErrorAndFinish(emitter, "回答生成失败，请稍后重试");
+        }
+    }
+
+    /**
+     * 执行回答主链路：按计划拉数 → 组装 Context → 第二次 LLM（流式，onDelta 增量推送）→
+     * 响应组装 → 会话记录（后置）。
      */
     private AssistantChatResponse answer(Long projectId, String conversationId, String message,
                                          String projectName, AssistantIntentAnalysis analysis,
-                                         List<ConversationTurn> history) {
+                                         List<ConversationTurn> history, Consumer<String> onDelta) {
         // 追加约束 2：standaloneQuestion 是本轮唯一有效问题，RAG query 与 Prompt 用户问题共用
         String effectiveQuestion = analysis.getStandaloneQuestion();
         AssistantQueryPlan plan = queryPlanner.buildPlan(analysis.getIntent());
         if (analysis.getIntent() == AssistantIntent.COMPARISON) {
             return answerComparison(projectId, conversationId, message, projectName,
-                    effectiveQuestion, history);
+                    effectiveQuestion, history, onDelta);
         }
         ProjectStructuredFactsVO facts = plan.isFetchFacts()
                 ? projectQueryService.queryProjectFacts(projectId) : null;
@@ -145,7 +205,7 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
                 .build();
         // Phase 11：Prompt 渲染与证据登记一体完成（userPrompt 标记与 evidence 一一对应）
         AssistantPromptBuilder.PromptBuildResult built = promptBuilder.build(ctx);
-        String answerText = generateAnswer(built.userPrompt());
+        String answerText = generateAnswer(built.userPrompt(), onDelta);
         AssistantChatResponse response = assembleResponse(projectId, conversationId,
                 answerText, ctx, built.evidence());
         // 追加约束 4：appendTurn 后置——Response 已构造完成，Redis 写失败仅 warn 不影响返回
@@ -165,7 +225,7 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
      */
     private AssistantChatResponse answerComparison(Long projectId, String conversationId, String message,
                                                    String projectName, String effectiveQuestion,
-                                                   List<ConversationTurn> history) {
+                                                   List<ConversationTurn> history, Consumer<String> onDelta) {
         ProjectComparisonService.ComparisonOutcome outcome =
                 comparisonService.compare(projectId, effectiveQuestion);
         if (outcome.deterministicAnswer() != null) {
@@ -189,7 +249,7 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
                 .build();
         // Phase 11：Prompt 渲染与证据登记一体完成（比较证据前置 + D 编号独立）
         AssistantPromptBuilder.PromptBuildResult built = promptBuilder.build(ctx);
-        String answerText = generateAnswer(built.userPrompt());
+        String answerText = generateAnswer(built.userPrompt(), onDelta);
         AssistantChatResponse response = assembleResponse(projectId, conversationId,
                 answerText, ctx, built.evidence());
         response.setComparisonData(outcome.comparison());
@@ -216,18 +276,30 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     }
 
     /**
-     * 第二次 LLM 调用（最终回答）。错误边界（追加约束 11）：调用异常或空白回答
-     * 一律 3001 上抛，禁止降级 UNKNOWN 或重进 RAG 形成不可控循环；
+     * 第二次 LLM 调用（最终回答，Phase K 流式版）。错误边界（追加约束 11）：调用异常
+     * 或空白回答一律 3001 上抛，禁止降级 UNKNOWN 或重进 RAG 形成不可控循环；
      * Phase 11：引用解析不在本边界内——解析异常只降级 citations（约束 3）。
+     * <p>
+     * Phase K：chatModel.stream 逐块消费回答增量，每块经 onDelta 推送 SSE delta 事件；
+     * 增量聚合为完整回答后统一走引用解析与响应组装（final 事件携带完整响应）。
      */
-    private String generateAnswer(String userPrompt) {
+    private String generateAnswer(String userPrompt, Consumer<String> onDelta) {
         try {
             Prompt prompt = new Prompt(List.of(
                     new SystemMessage(promptBuilder.buildSystemPrompt()),
                     new UserMessage(userPrompt)));
-            ChatResponse response = chatModel.call(prompt);
-            String text = response.getResult().getOutput().getText();
-            if (text == null || text.isBlank()) {
+            StringBuilder answer = new StringBuilder();
+            chatModel.stream(prompt)
+                    .doOnNext(response -> {
+                        String delta = response.getResult().getOutput().getText();
+                        if (delta != null && !delta.isEmpty()) {
+                            answer.append(delta);
+                            onDelta.accept(delta);
+                        }
+                    })
+                    .blockLast();
+            String text = answer.toString();
+            if (text.isBlank()) {
                 throw new BusinessException(ResultCode.AI_INVOKE_ERROR, "AI 未返回有效回答");
             }
             return text;
@@ -236,6 +308,50 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
         } catch (Exception e) {
             log.error("项目助手 AI 回答调用失败: {}", e.getMessage(), e);
             throw new BusinessException(ResultCode.AI_INVOKE_ERROR, "AI 回答调用失败");
+        }
+    }
+
+    // ==================== SSE 收发辅助 ====================
+
+    /**
+     * 发送单个 SSE 事件（Phase K）。payload 经 Spring MVC 配置的 Jackson 转换器
+     * 序列化（沿用 Long → String 防精度丢失全局契约）；连接断开（IOException）
+     * 转为非受检异常由编排层兜底 complete。protected 供测试拦截记录事件
+     * （ResponseBodyEmitter.Handler 为包私有 SPI，不可跨包实现）。
+     */
+    protected void sendEvent(SseEmitter emitter, String eventName, Object payload) {
+        try {
+            emitter.send(SseEmitter.event()
+                    .name(eventName)
+                    .data(payload, MediaType.APPLICATION_JSON));
+        } catch (IOException e) {
+            log.debug("助手 SSE 事件发送失败（客户端可能已断开）event={}: {}", eventName, e.getMessage());
+            throw new IllegalStateException("SSE 事件发送失败", e);
+        }
+    }
+
+    /**
+     * 发送 error 事件并收尾：发送失败仅降级 debug（连接已断开时 error 也不可达），
+     * 始终 complete 保证连接生命周期收敛。
+     */
+    private void sendErrorAndFinish(SseEmitter emitter, String message) {
+        try {
+            sendEvent(emitter, EVENT_ERROR, Map.of("message", message));
+        } catch (Exception e) {
+            log.debug("助手 SSE error 事件发送失败: {}", e.getMessage());
+        } finally {
+            finish(emitter);
+        }
+    }
+
+    /**
+     * 收尾 complete（幂等安全：连接已断开时 complete 异常仅降级 debug）
+     */
+    private void finish(SseEmitter emitter) {
+        try {
+            emitter.complete();
+        } catch (Exception e) {
+            log.debug("助手 SSE complete 失败: {}", e.getMessage());
         }
     }
 

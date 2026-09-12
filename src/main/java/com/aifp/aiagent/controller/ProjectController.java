@@ -27,11 +27,11 @@ public class ProjectController {
     private final ProjectFormService projectFormService;
 
     /**
-     * 创建项目
+     * 创建项目（返回 IdVO：ID 字符串序列化，避免前端 JS 大整数精度丢失）
      */
     @PostMapping
-    public Result<Long> create(@Valid @RequestBody ProjectCreateDTO dto) {
-        return Result.success(projectService.createProject(dto));
+    public Result<IdVO> create(@Valid @RequestBody ProjectCreateDTO dto) {
+        return Result.success(IdVO.of(projectService.createProject(dto)));
     }
 
     /**
@@ -99,12 +99,12 @@ public class ProjectController {
     }
 
     /**
-     * 绑定表单到项目（同项目同表单唯一，重复绑定拒绝）
+     * 绑定表单到项目（同项目同表单唯一，重复绑定拒绝；返回 IdVO 字符串化 ID）
      */
     @PostMapping("/{id}/form")
-    public Result<Long> bindForm(@PathVariable Long id,
+    public Result<IdVO> bindForm(@PathVariable Long id,
                                  @Valid @RequestBody ProjectFormCreateDTO dto) {
-        return Result.success(projectFormService.createProjectForm(id, dto));
+        return Result.success(IdVO.of(projectFormService.createProjectForm(id, dto)));
     }
 
     /**

@@ -32,6 +32,24 @@ const routes: RouteRecordRaw[] = [
                 meta: {title: '表单详情', icon: 'View', hidden: true}
             },
             {
+                path: '/project/list',
+                name: 'ProjectList',
+                component: () => import('@/views/project/ProjectList.vue'),
+                meta: {title: '项目管理', icon: 'Folder'}
+            },
+            {
+                path: '/project/create',
+                name: 'ProjectCreate',
+                component: () => import('@/views/project/ProjectCreate.vue'),
+                meta: {title: '新建项目', icon: 'Folder', hidden: true}
+            },
+            {
+                path: '/project/:id',
+                name: 'ProjectDetail',
+                component: () => import('@/views/project/ProjectDetail.vue'),
+                meta: {title: '项目详情', icon: 'Folder', hidden: true}
+            },
+            {
                 path: '/file/upload',
                 name: 'FileUpload',
                 component: () => import('@/views/file/FileUpload.vue'),
@@ -42,6 +60,12 @@ const routes: RouteRecordRaw[] = [
                 name: 'AiFill',
                 component: () => import('@/views/fill/AiFill.vue'),
                 meta: {title: 'AI自动填报', icon: 'MagicStick'}
+            },
+            {
+                path: '/assistant',
+                name: 'AssistantConsole',
+                component: () => import('@/views/assistant/AssistantConsole.vue'),
+                meta: {title: '智能对话', icon: 'ChatDotRound'}
             }
         ]
     },

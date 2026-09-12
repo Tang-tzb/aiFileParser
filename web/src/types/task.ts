@@ -57,6 +57,8 @@ export interface ExtractionResult {
 export interface TaskStartRequest {
     formId: number | string
     fileId: number | string
+    /** 项目 ID（Phase 2 起必传，后端校验表单/文件/项目关联一致性，失败返回 6011） */
+    projectId: number | string
 }
 
 /**

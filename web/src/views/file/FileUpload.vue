@@ -1,28 +1,40 @@
 <script lang="ts" setup>
-import {ref} from 'vue'
-import {useRouter} from 'vue-router'
-import {ElMessage} from 'element-plus'
+import {computed, onMounted, ref} from 'vue'
+import {useRoute, useRouter} from 'vue-router'
 import type {UploadFile} from 'element-plus'
+import {ElMessage, ElMessageBox} from 'element-plus'
 import {UploadFilled} from '@element-plus/icons-vue'
-import {uploadFile} from '@/api/file'
+import {getFileList, uploadFile} from '@/api/file'
 import {
-  FILE_TYPE_LABELS,
-  FILE_STATUS_LABELS,
   ACCEPT_EXT,
+  FILE_STATUS_LABELS,
+  FILE_TYPE_LABELS,
+  type FileRecordVO,
+  FileStatus,
   type FileUploadVO
 } from '@/types/file'
 import {setLastUpload} from '@/utils/lastUpload'
+import ProjectBindDialog from '@/components/ProjectBindDialog.vue'
 
 /**
- * 文件上传页（Phase 3）
+ * 文件上传页（Phase 3 / Phase C 项目上下文 / Phase H 文件列表与绑定）
  *
  * - 单文件逐个上传，手动控制 FormData 调用 POST /file/upload
  * - 不依赖 el-upload 默认上传行为（:auto-upload=false）
  * - 上传进度通过 axios onUploadProgress 实时展示
  * - 上传成功后保存 fileId 到 localStorage，供后续 AI 填报阶段使用
+ * - 项目上下文：从项目详情"去上传"进入时（携带 ?projectId=&projectName=），明示归属并把
+ *   projectId 传给后端；跳转 AI 填报延续项目上下文。菜单直进时行为与原来一致（无归属上传）
+ * - Phase H：全部文件分页列表（GET /file/page）；未归属文件可"绑定项目"（单归属语义，
+ *   已归属其他项目报 6003）；未带 projectId 上传成功后询问是否立即绑定
  */
 
+const route = useRoute()
 const router = useRouter()
+
+// 项目上下文（Phase C：来自项目详情"去上传"入口的 query）
+const projectId = computed(() => (route.query.projectId as string) || '')
+const projectName = computed(() => (route.query.projectName as string) || '')
 
 // 文件大小上限：100MB（与后端 spring.servlet.multipart.max-file-size 一致）
 const MAX_SIZE = 100 * 1024 * 1024
@@ -35,6 +47,60 @@ const uploading = ref(false)
 const progress = ref(0)
 // 上传结果
 const result = ref<FileUploadVO | null>(null)
+
+// ===== Phase H：全部文件列表 =====
+
+// 列表数据与分页状态
+const fileList = ref<FileRecordVO[]>([])
+const fileTotal = ref(0)
+const filePageNum = ref(1)
+const FILE_PAGE_SIZE = 10
+const fileListLoading = ref(false)
+
+// 绑定项目弹窗状态（仅未归属文件可绑定；file 单归属语义）
+const bindVisible = ref(false)
+const bindFileId = ref('')
+const bindFileName = ref('')
+
+/** 拉取全部文件分页列表 */
+async function loadFileList() {
+  fileListLoading.value = true
+  try {
+    const data = await getFileList({pageNum: filePageNum.value, pageSize: FILE_PAGE_SIZE})
+    fileList.value = data?.records ?? []
+    fileTotal.value = data?.total ?? 0
+  } catch {
+    // 错误已由 axios 拦截器统一提示
+  } finally {
+    fileListLoading.value = false
+  }
+}
+
+/** 列表翻页 */
+function handleFilePageChange(p: number) {
+  filePageNum.value = p
+  loadFileList()
+}
+
+/** 打开绑定项目弹窗（仅未归属文件，单归属语义前置禁绑） */
+function handleBindProject(row: FileRecordVO) {
+  if (row.projectId) return
+  bindFileId.value = String(row.fileId)
+  bindFileName.value = row.fileName
+  bindVisible.value = true
+}
+
+/** 绑定成功：刷新列表归属状态 */
+function handleBound() {
+  loadFileList()
+}
+
+/** 处理状态 Tag 样式（SUCCESS 绿 / FAILED 红 / 中间态灰） */
+function statusTagType(status: FileStatus): 'success' | 'danger' | 'info' {
+  if (status === FileStatus.SUCCESS) return 'success'
+  if (status === FileStatus.FAILED) return 'danger'
+  return 'info'
+}
 
 /**
  * el-upload on-change 钩子：选中文件时触发
@@ -63,9 +129,9 @@ function handleRemoveFile() {
 
 /**
  * 执行上传
- * - 调 uploadFile，进度回调更新 progress
- * - 成功：写入 result、持久化 fileId、成功提示
- * - 失败：错误由 axios 拦截器统一提示
+ * - 调 uploadFile，进度回调更新 progress；有项目上下文时透传 projectId
+ * - 成功：写入 result、持久化 fileId（含项目归属）、成功提示
+ * - 失败：错误由 axios 拦截器统一提示（6007 项目无效）
  */
 async function handleUpload() {
   if (!currentFile.value) {
@@ -75,13 +141,20 @@ async function handleUpload() {
   uploading.value = true
   progress.value = 0
   try {
-    const data = await uploadFile(currentFile.value, (p) => {
-      progress.value = p
+    const data = await uploadFile(currentFile.value, {
+      projectId: projectId.value || undefined,
+      onProgress: (p) => {
+        progress.value = p
+      }
     })
     result.value = data
-    // 持久化最近上传 fileId，供 AI 填报页使用
-    setLastUpload(data)
+    // 持久化最近上传 fileId 与项目归属，供 AI 填报页防串项目预填
+    setLastUpload(
+        data,
+        projectId.value ? {projectId: projectId.value, projectName: projectName.value} : undefined
+    )
     ElMessage.success('上传成功')
+    await afterUploadSuccess()
   } catch {
     // 错误已由 axios 拦截器统一提示
   } finally {
@@ -90,15 +163,55 @@ async function handleUpload() {
   }
 }
 
+/**
+ * 上传成功后的绑定询问（Phase H）
+ * - 带 projectId 上传：后端已直接归属，不询问，仅刷新列表
+ * - 未带 projectId 上传：询问是否立即绑定到项目（文件单归属语义）
+ *   → 去绑定：打开绑定弹窗（可关闭后继续），绑定成功由 @bound 刷新列表
+ *   → 稍后：直接刷新列表
+ */
+async function afterUploadSuccess() {
+  if (projectId.value) {
+    await loadFileList()
+    return
+  }
+  let goBind = false
+  try {
+    await ElMessageBox.confirm('是否立即绑定到项目？', '绑定项目', {
+      confirmButtonText: '去绑定',
+      cancelButtonText: '稍后',
+      type: 'info'
+    })
+    goBind = true
+  } catch {
+    goBind = false
+  }
+  if (goBind && result.value) {
+    bindFileId.value = String(result.value.fileId)
+    bindFileName.value = result.value.fileName
+    bindVisible.value = true
+  }
+  await loadFileList()
+}
+
+// 初始加载文件列表
+onMounted(() => {
+  loadFileList()
+})
+
 /** 重置状态，继续上传新文件 */
 function handleReset() {
   currentFile.value = null
   result.value = null
 }
 
-/** 跳转 AI 填报页 */
+/** 跳转 AI 填报页（有项目上下文时延续） */
 function goAiFill() {
-  router.push('/fill/index')
+  if (projectId.value) {
+    router.push({path: '/fill/index', query: {projectId: projectId.value}})
+  } else {
+    router.push('/fill/index')
+  }
 }
 
 /** 格式化文件大小 */
@@ -124,6 +237,17 @@ function formatTime(time: string): string {
         <p class="desc">支持 PDF / Excel / Word / TXT，单个文件 ≤ 100MB</p>
       </div>
     </el-card>
+
+    <!-- 项目归属明示（Phase C：从项目详情进入时展示） -->
+    <el-alert
+        v-if="projectId"
+        :closable="false"
+        class="project-alert"
+        show-icon
+        type="info"
+    >
+      本次上传将归属于项目：{{ projectName || '未命名项目' }}（ID: {{ projectId }}）
+    </el-alert>
 
     <!-- 上传区 -->
     <el-card class="upload-card" shadow="never">
@@ -215,7 +339,10 @@ function formatTime(time: string): string {
           </el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="上传时间">{{ formatTime(result.createTime) }}</el-descriptions-item>
-        <el-descriptions-item :span="2" label="存储路径">
+        <el-descriptions-item v-if="projectId" label="所属项目">
+          {{ projectName || projectId }}
+        </el-descriptions-item>
+        <el-descriptions-item :span="projectId ? 1 : 2" label="存储路径">
           <span :title="result.filePath" class="mono">{{ result.filePath }}</span>
         </el-descriptions-item>
       </el-descriptions>
@@ -230,6 +357,72 @@ function formatTime(time: string): string {
         <el-button @click="handleReset">继续上传</el-button>
       </div>
     </el-card>
+
+    <!-- 全部文件列表（Phase H：分页查询 + 未归属文件绑定项目） -->
+    <el-card class="file-list-card" shadow="never">
+      <template #header>
+        <span class="list-title">全部文件</span>
+      </template>
+
+      <el-table v-loading="fileListLoading" :data="fileList" size="small">
+        <el-table-column label="文件名" min-width="180" prop="fileName" show-overflow-tooltip/>
+        <el-table-column align="center" label="类型" width="100">
+          <template #default="{ row }">
+            {{ FILE_TYPE_LABELS[row.fileType as keyof typeof FILE_TYPE_LABELS] || row.fileType }}
+          </template>
+        </el-table-column>
+        <el-table-column align="center" label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag :type="statusTagType(row.status)" size="small">
+              {{ FILE_STATUS_LABELS[row.status as FileStatus] || row.status }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column align="center" label="归属" width="90">
+          <template #default="{ row }">
+            <el-tag :type="row.projectId ? 'success' : 'info'" size="small">
+              {{ row.projectId ? '已归属' : '未归属' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column align="center" label="上传时间" width="160">
+          <template #default="{ row }">{{ formatTime(row.createTime) }}</template>
+        </el-table-column>
+        <el-table-column align="center" label="操作" width="100">
+          <template #default="{ row }">
+            <el-button
+                v-if="!row.projectId"
+                link
+                size="small"
+                type="primary"
+                @click="handleBindProject(row as FileRecordVO)"
+            >
+              绑定项目
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div class="pagination-bar">
+        <el-pagination
+            v-model:current-page="filePageNum"
+            :page-size="FILE_PAGE_SIZE"
+            :total="fileTotal"
+            background
+            layout="total, prev, pager, next"
+            @current-change="handleFilePageChange"
+        />
+      </div>
+    </el-card>
+
+    <!-- 绑定项目弹窗（file 单归属语义：仅未归属文件可绑定） -->
+    <ProjectBindDialog
+        v-model:visible="bindVisible"
+        :file-id="bindFileId"
+        :file-name="bindFileName"
+        bind-type="file"
+        @bound="handleBound"
+    />
   </div>
 </template>
 
@@ -237,6 +430,10 @@ function formatTime(time: string): string {
 .file-upload-page {
   max-width: 800px;
   margin: 0 auto;
+
+  .project-alert {
+    margin-bottom: 16px;
+  }
 
   .header-card {
     margin-bottom: 16px;
@@ -358,6 +555,20 @@ function formatTime(time: string): string {
       display: flex;
       justify-content: center;
       gap: 12px;
+    }
+  }
+
+  .file-list-card {
+    margin-bottom: 16px;
+
+    .list-title {
+      font-weight: 600;
+    }
+
+    .pagination-bar {
+      display: flex;
+      justify-content: flex-end;
+      margin-top: 12px;
     }
   }
 }

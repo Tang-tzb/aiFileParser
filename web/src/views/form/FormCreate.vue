@@ -1,16 +1,12 @@
 <script lang="ts" setup>
-import {ref, reactive, computed} from 'vue'
+import {computed, reactive, ref, watch} from 'vue'
 import {useRouter} from 'vue-router'
 import type {FormInstance, FormRules} from 'element-plus'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import {createForm} from '@/api/form'
-import {
-  FieldType,
-  FIELD_TYPE_LABELS,
-  type FormCreateDTO,
-  type FormFieldCreateDTO
-} from '@/types/form'
+import {FIELD_TYPE_LABELS, FieldType, type FormCreateDTO, type FormFieldCreateDTO} from '@/types/form'
 import FormFieldEditor from '@/components/FormFieldEditor.vue'
+import ProjectBindDialog from '@/components/ProjectBindDialog.vue'
 
 /**
  * 创建表单页
@@ -115,13 +111,54 @@ async function handleSubmit() {
   try {
     const formId = await createForm(payload)
     ElMessage.success(`表单创建成功，ID：${formId}`)
-    router.replace(`/form/${formId}`)
+    await confirmBindAfterCreate(formId)
   } catch {
     // 错误已统一处理
   } finally {
     submitting.value = false
   }
 }
+
+// ===== 创建成功后的绑定项目入口（同一表单可绑定多个项目） =====
+
+// 绑定弹窗显隐
+const bindVisible = ref(false)
+// 新创建的表单 ID（绑定用，字符串避免大整数精度丢失）
+const createdFormId = ref('')
+
+/**
+ * 创建成功后询问是否立即绑定到项目
+ * - 去绑定：打开 ProjectBindDialog（可连续绑定多个项目），弹窗关闭后跳表单详情
+ * - 稍后：直接跳表单详情（保留旧路径）
+ */
+async function confirmBindAfterCreate(formId: number | string) {
+  let goBind = false
+  try {
+    await ElMessageBox.confirm('是否立即绑定到项目？同一表单可绑定多个项目。', '绑定项目', {
+      confirmButtonText: '去绑定',
+      cancelButtonText: '稍后',
+      type: 'info'
+    })
+    goBind = true
+  } catch {
+    goBind = false
+  }
+
+  if (goBind) {
+    createdFormId.value = String(formId)
+    bindVisible.value = true
+  } else {
+    router.replace(`/form/${formId}`)
+  }
+}
+
+/** 绑定弹窗关闭后跳转表单详情（收口） */
+watch(bindVisible, (v) => {
+  if (!v && createdFormId.value) {
+    router.replace(`/form/${createdFormId.value}`)
+    createdFormId.value = ''
+  }
+})
 
 // 返回列表
 function handleBack() {
@@ -255,6 +292,9 @@ function fieldTypeTagType(type: FieldType) {
         :max-sort="maxSort"
         @confirm="handleFieldConfirm"
     />
+
+    <!-- 绑定项目弹窗（创建成功后可选绑定，同一表单可绑多个项目） -->
+    <ProjectBindDialog v-model:visible="bindVisible" :form-id="createdFormId"/>
   </div>
 </template>
 

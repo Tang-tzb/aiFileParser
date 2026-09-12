@@ -1,9 +1,10 @@
 <script lang="ts" setup>
-import {ref, onMounted} from 'vue'
+import {onMounted, ref} from 'vue'
 import {useRouter} from 'vue-router'
 import {ElMessage, ElMessageBox} from 'element-plus'
-import {getFormDetail, getFormList, deleteForm} from '@/api/form'
+import {deleteForm, getFormDetail, getFormList} from '@/api/form'
 import type {FormVO} from '@/types/form'
+import ProjectBindDialog from '@/components/ProjectBindDialog.vue'
 
 /**
  * 表单管理列表页
@@ -76,6 +77,21 @@ function handlePageChange(p: number) {
 // 进入详情页
 function handleViewDetail(formId: number | string) {
   router.push(`/form/${formId}`)
+}
+
+// ===== 绑定项目（同一表单可绑定多个项目，6005 同项目重复绑定由拦截器提示） =====
+
+// 绑定弹窗显隐
+const bindVisible = ref(false)
+// 当前绑定的表单 ID / 名称（ID 字符串化避免大整数精度丢失）
+const bindFormId = ref('')
+const bindFormName = ref('')
+
+// 打开绑定项目弹窗
+function handleBindProject(row: FormVO) {
+  bindFormId.value = String(row.formId)
+  bindFormName.value = row.formName
+  bindVisible.value = true
 }
 
 // 删除表单
@@ -164,10 +180,13 @@ onMounted(loadList)
             {{ row.createTime ? new Date(row.createTime).toLocaleString('zh-CN') : '-' }}
           </template>
         </el-table-column>
-        <el-table-column fixed="right" label="操作" width="180">
+        <el-table-column fixed="right" label="操作" width="230">
           <template #default="{ row }">
             <el-button link size="small" type="primary" @click="handleViewDetail(row.formId)">
               查看详情
+            </el-button>
+            <el-button link size="small" type="primary" @click="handleBindProject(row as FormVO)">
+              绑定项目
             </el-button>
             <el-button link size="small" type="danger" @click="handleDelete(row as FormVO)">
               删除
@@ -187,6 +206,9 @@ onMounted(loadList)
         />
       </div>
     </el-card>
+
+    <!-- 绑定项目弹窗（同一表单可绑定多个项目） -->
+    <ProjectBindDialog v-model:visible="bindVisible" :form-id="bindFormId" :form-name="bindFormName"/>
   </div>
 </template>
 

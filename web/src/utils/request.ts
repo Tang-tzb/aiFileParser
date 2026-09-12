@@ -1,6 +1,6 @@
-import axios, {type AxiosInstance, type AxiosRequestConfig, AxiosError} from 'axios'
+import axios, {AxiosError, type AxiosInstance, type AxiosRequestConfig} from 'axios'
 import {ElMessage} from 'element-plus'
-import {RESULT_SUCCESS_CODE, type Result} from '@/types/api'
+import {type Result, RESULT_SUCCESS_CODE} from '@/types/api'
 
 /**
  * Axios 实例
@@ -41,8 +41,11 @@ service.interceptors.response.use(
         }
 
         // 业务失败：统一提示，返回 rejected promise
+        // Error 附加业务错误码（如 6002 项目编号已存在），供页面做字段级错误提示
         ElMessage.error(result.message || '请求失败')
-        return Promise.reject(new Error(result.message || '请求失败'))
+        const err: Error & { code?: number } = new Error(result.message || '请求失败')
+        err.code = result.code
+        return Promise.reject(err)
     },
     (error: AxiosError) => {
         // HTTP 层错误统一处理

@@ -73,7 +73,7 @@ class ProjectControllerTest {
     // ==================== POST /project ====================
 
     /**
-     * 合法请求 → 200, data=projectId, service 被调用
+     * 合法请求 → 200, data=IdVO（id 字符串序列化防精度丢失）, service 被调用
      */
     @Test
     void create_shouldReturnProjectId() throws Exception {
@@ -86,7 +86,8 @@ class ProjectControllerTest {
                 .andDo(print())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(200))
-                .andExpect(jsonPath("$.message").value("操作成功"));
+                .andExpect(jsonPath("$.message").value("操作成功"))
+                .andExpect(jsonPath("$.data.id").value(String.valueOf(PROJECT_ID)));
 
         verify(projectService).createProject(any(ProjectCreateDTO.class));
     }
@@ -397,7 +398,7 @@ class ProjectControllerTest {
     // ==================== 项目表单实例（Phase 3） ====================
 
     /**
-     * 绑定表单 → 200, data=projectFormId（字符串序列化防精度丢失）
+     * 绑定表单 → 200, data=IdVO（id 字符串序列化防精度丢失）
      */
     @Test
     void bindForm_success_returnsProjectFormId() throws Exception {
@@ -410,7 +411,7 @@ class ProjectControllerTest {
                 .andDo(print())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(200))
-                .andExpect(jsonPath("$.data").value(String.valueOf(PROJECT_FORM_ID)));
+                .andExpect(jsonPath("$.data.id").value(String.valueOf(PROJECT_FORM_ID)));
 
         verify(projectFormService).createProjectForm(eq(PROJECT_ID), any(ProjectFormCreateDTO.class));
     }

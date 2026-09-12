@@ -1,25 +1,24 @@
 <script lang="ts" setup>
-import {ref, computed, onMounted} from 'vue'
+import {computed, onMounted, ref} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
 import {ElMessage, ElMessageBox} from 'element-plus'
-import {getFormDetail, addField, deleteField} from '@/api/form'
-import {
-  FieldType,
-  FIELD_TYPE_LABELS,
-  type FormVO,
-  type FormFieldVO,
-  type FormFieldCreateDTO
-} from '@/types/form'
+import {addField, deleteField, getFormDetail} from '@/api/form'
+import {FIELD_TYPE_LABELS, FieldType, type FormFieldCreateDTO, type FormFieldVO, type FormVO} from '@/types/form'
 import FormFieldEditor from '@/components/FormFieldEditor.vue'
+import ProjectBindDialog from '@/components/ProjectBindDialog.vue'
 
 /**
  * 表单详情页
  * - 展示表单头信息 + 字段列表
  * - 支持追加字段（POST /form/{id}/field）
  * - 支持删除字段（DELETE /form/{id}/field/{fieldId}）
+ * - 支持绑定项目（同一表单可绑定多个项目，6005 同项目重复绑定由拦截器提示）
  */
 const route = useRoute()
 const router = useRouter()
+
+// 绑定项目弹窗显隐
+const bindVisible = ref(false)
 
 // 表单 ID（保持字符串，避免大整数精度丢失）
 const formId = computed(() => route.params.id as string)
@@ -137,12 +136,21 @@ onMounted(() => {
               <el-icon><Document/></el-icon>
               {{ formDetail.formName }}
             </span>
-            <el-button @click="handleBack">
-              <el-icon>
-                <Back/>
-              </el-icon>
-              返回列表
-            </el-button>
+            <div class="header-actions">
+              <!-- 绑定项目（同一表单可绑定多个项目） -->
+              <el-button plain type="primary" @click="bindVisible = true">
+                <el-icon>
+                  <Link/>
+                </el-icon>
+                绑定项目
+              </el-button>
+              <el-button @click="handleBack">
+                <el-icon>
+                  <Back/>
+                </el-icon>
+                返回列表
+              </el-button>
+            </div>
           </div>
         </template>
         <el-descriptions :column="2" border>
@@ -232,6 +240,13 @@ onMounted(() => {
         :initial-data="null"
         :max-sort="maxSort"
         @confirm="handleFieldConfirm"
+    />
+
+    <!-- 绑定项目弹窗（同一表单可绑定多个项目） -->
+    <ProjectBindDialog
+        v-model:visible="bindVisible"
+        :form-id="formId"
+        :form-name="formDetail?.formName"
     />
   </div>
 </template>

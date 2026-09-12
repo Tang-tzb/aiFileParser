@@ -1,20 +1,24 @@
 <script lang="ts" setup>
 import {computed, onMounted, onUnmounted, ref} from 'vue'
+import {useRoute} from 'vue-router'
 import {ElMessage} from 'element-plus'
-import {getFormDetail, getFormList} from '@/api/form'
-import {getFileList} from '@/api/file'
+import {getFormDetail} from '@/api/form'
+import {getProjectFiles, getProjectForms, getProjectPage} from '@/api/project'
 import {startTask} from '@/api/task'
 import {subscribeTaskProgress} from '@/utils/sse'
 import {getLastUpload} from '@/utils/lastUpload'
 import {useTaskStore} from '@/stores/task'
 import {type FieldError, TASK_STATUS_LABELS, type TaskProgress, type TaskStartVO, TaskStatus} from '@/types/task'
-import type {FormFieldVO, FormVO} from '@/types/form'
+import type {FormFieldVO} from '@/types/form'
 import type {FileRecordVO} from '@/types/file'
+import {ProjectFormStatus, type ProjectFormVO, type ProjectVO} from '@/types/project'
 
 /**
- * AI 自动填报页（Phase 4）
+ * AI 自动填报页（Phase 4 / Phase C 项目上下文）
  *
- * - 配置区：选择表单 + 选择文件 + 启动异步任务（POST /task）
+ * - 配置区：选择项目 → 选择表单（项目绑定实例）→ 选择文件（项目内文件）→ 启动异步任务（POST /task）
+ * - 项目维度强约束：表单/文件下拉均来自所选项目，保证"表单/文件/项目"三者关联一致（6011 前置规避）
+ * - lastUpload 防串项目：仅当最近上传记录归属与所选项目一致时才预填文件
  * - 进度区：SSE 订阅 /task/progress/{taskId}，展示进度条 / 阶段状态 / 消息
  * - 结果区：抽取值表 + 错误列表 + 重试次数
  * - 离开页面 onUnmounted 关闭 EventSource，避免连接泄漏
@@ -22,13 +26,18 @@ import type {FileRecordVO} from '@/types/file'
  */
 defineOptions({name: 'AiFill'})
 
+const route = useRoute()
 const taskStore = useTaskStore()
 
 // ===== 配置区状态 =====
-// 表单下拉数据
-const formOptions = ref<FormVO[]>([])
-// 文件下拉数据
+// 项目下拉数据
+const projectOptions = ref<ProjectVO[]>([])
+// 表单下拉数据（项目绑定的 ACTIVE 实例）
+const formOptions = ref<ProjectFormVO[]>([])
+// 文件下拉数据（项目内文件）
 const fileOptions = ref<FileRecordVO[]>([])
+// 选中的项目 ID（字符串以兼容大整数）
+const selectedProjectId = ref<string>('')
 // 选中的表单 ID（字符串以兼容大整数）
 const selectedFormId = ref<string>('')
 // 选中的文件 ID（字符串以兼容大整数）
@@ -36,6 +45,7 @@ const selectedFileId = ref<string>('')
 // 当前选中表单的字段列表（用于预览 + 结果字段映射）
 const formFields = ref<FormFieldVO[]>([])
 // 下拉加载中
+const projectLoading = ref(false)
 const formLoading = ref(false)
 const fileLoading = ref(false)
 // 字段详情加载中
@@ -107,12 +117,31 @@ const valueRows = computed(() => {
 const errorRows = computed<FieldError[]>(() => taskStore.result?.errors ?? [])
 
 // ===== 加载下拉数据 =====
-/** 加载表单列表（仅取第一页 50 条，覆盖大多数场景） */
+/** 加载项目下拉列表（仅取第一页 50 条，覆盖大多数场景） */
+async function loadProjectOptions() {
+  projectLoading.value = true
+  try {
+    const data = await getProjectPage({pageNum: 1, pageSize: 50})
+    projectOptions.value = data?.records ?? []
+  } catch {
+    // 错误由 axios 拦截器统一提示
+  } finally {
+    projectLoading.value = false
+  }
+}
+
+/** 加载表单下拉（所选项目绑定的 ACTIVE 实例，保证表单/文件/项目三者一致） */
 async function loadFormOptions() {
+  if (!selectedProjectId.value) {
+    formOptions.value = []
+    return
+  }
   formLoading.value = true
   try {
-    const data = await getFormList({pageNum: 1, pageSize: 50})
-    formOptions.value = data?.records ?? []
+    const data = await getProjectForms(selectedProjectId.value, {pageNum: 1, pageSize: 50})
+    formOptions.value = (data?.records ?? []).filter(
+        (f) => f.status === ProjectFormStatus.ACTIVE
+    )
   } catch {
     // 错误由 axios 拦截器统一提示
   } finally {
@@ -120,11 +149,15 @@ async function loadFormOptions() {
   }
 }
 
-/** 加载文件列表（仅取第一页 50 条） */
+/** 加载文件下拉（仅所选项目内的文件） */
 async function loadFileOptions() {
+  if (!selectedProjectId.value) {
+    fileOptions.value = []
+    return
+  }
   fileLoading.value = true
   try {
-    const data = await getFileList({pageNum: 1, pageSize: 50})
+    const data = await getProjectFiles(selectedProjectId.value, {pageNum: 1, pageSize: 50})
     fileOptions.value = data?.records ?? []
   } catch {
     // 错误由 axios 拦截器统一提示
@@ -134,6 +167,14 @@ async function loadFileOptions() {
 }
 
 // ===== 选择联动 =====
+/** 选择项目后：清空表单/文件选择并重拉项目维度下拉 */
+async function handleProjectChange() {
+  selectedFormId.value = ''
+  selectedFileId.value = ''
+  formFields.value = []
+  await Promise.all([loadFormOptions(), loadFileOptions()])
+}
+
 /** 选择表单后，加载其字段列表用于预览 */
 async function handleFormChange(formId: string) {
   formFields.value = []
@@ -158,6 +199,10 @@ function findFile(fileId: string): FileRecordVO | undefined {
 /** 校验并启动异步任务，启动成功后立即订阅 SSE */
 async function handleStart() {
   errorMsg.value = ''
+  if (!selectedProjectId.value) {
+    ElMessage.warning('请选择项目')
+    return
+  }
   if (!selectedFormId.value) {
     ElMessage.warning('请选择表单')
     return
@@ -175,7 +220,8 @@ async function handleStart() {
   try {
     startVO = await startTask({
       formId: selectedFormId.value,
-      fileId: selectedFileId.value
+      fileId: selectedFileId.value,
+      projectId: selectedProjectId.value
     })
   } catch {
     // 错误由 axios 拦截器统一提示
@@ -247,11 +293,23 @@ function formatValue(v: unknown): string {
 
 // ===== 生命周期 =====
 onMounted(async () => {
-  await Promise.all([loadFormOptions(), loadFileOptions()])
-  // 预填最近上传的文件 ID，提升体验
+  await loadProjectOptions()
   const last = getLastUpload()
-  if (last?.fileId) {
-    selectedFileId.value = last.fileId
+  // 项目初始化优先级：query（从上传页跳转延续）> lastUpload 归属 > 空
+  const queryProjectId = (route.query.projectId as string) || ''
+  if (queryProjectId && projectOptions.value.some(p => String(p.projectId) === queryProjectId)) {
+    selectedProjectId.value = queryProjectId
+  } else if (last?.projectId && projectOptions.value.some(p => String(p.projectId) === last.projectId)) {
+    selectedProjectId.value = last.projectId
+  }
+  // 项目确定后加载项目维度下拉
+  if (selectedProjectId.value) {
+    await Promise.all([loadFormOptions(), loadFileOptions()])
+    // 防串项目预填：仅当最近上传记录归属与所选项目一致且文件在选项中时预填
+    if (last?.fileId && last.projectId && String(last.projectId) === String(selectedProjectId.value)
+        && fileOptions.value.some(f => String(f.fileId) === last.fileId)) {
+      selectedFileId.value = last.fileId
+    }
   }
 })
 
@@ -267,7 +325,7 @@ onUnmounted(() => {
     <el-card class="header-card" shadow="never">
       <div class="header">
         <h2 class="title">AI 自动填报</h2>
-        <p class="desc">选择表单与文件后启动异步解析，SSE 实时推送进度，完成后展示 AI 抽取结果</p>
+        <p class="desc">选择项目、表单与文件后启动异步解析，SSE 实时推送进度，完成后展示 AI 抽取结果</p>
       </div>
     </el-card>
 
@@ -283,19 +341,38 @@ onUnmounted(() => {
       </template>
 
       <el-form label-position="right" label-width="80px">
+        <el-form-item label="选择项目">
+          <el-select
+              v-model="selectedProjectId"
+              :disabled="running"
+              :loading="projectLoading"
+              class="full-width"
+              filterable
+              placeholder="请选择项目"
+              @change="handleProjectChange"
+          >
+            <el-option
+                v-for="p in projectOptions"
+                :key="p.projectId"
+                :label="`${p.projectName}（${p.projectNo}）`"
+                :value="String(p.projectId)"
+            />
+          </el-select>
+        </el-form-item>
+
         <el-form-item label="选择表单">
           <el-select
               v-model="selectedFormId"
-              :disabled="running"
+              :disabled="!selectedProjectId || running"
               :loading="formLoading"
               class="full-width"
               filterable
-              placeholder="请选择表单"
+              :placeholder="selectedProjectId ? '请选择表单' : '请先选择项目'"
               @change="handleFormChange"
           >
             <el-option
                 v-for="f in formOptions"
-                :key="f.formId"
+                :key="f.projectFormId"
                 :label="`${f.formName}（${f.formId}）`"
                 :value="String(f.formId)"
             />
@@ -305,11 +382,11 @@ onUnmounted(() => {
         <el-form-item label="选择文件">
           <el-select
               v-model="selectedFileId"
-              :disabled="running"
+              :disabled="!selectedProjectId || running"
               :loading="fileLoading"
               class="full-width"
               filterable
-              placeholder="请选择文件"
+              :placeholder="selectedProjectId ? '请选择文件' : '请先选择项目'"
           >
             <el-option
                 v-for="f in fileOptions"
@@ -329,7 +406,7 @@ onUnmounted(() => {
         <!-- 启动按钮 -->
         <el-form-item>
           <el-button
-              :disabled="!selectedFormId || !selectedFileId || running"
+              :disabled="!selectedProjectId || !selectedFormId || !selectedFileId || running"
               :loading="starting"
               size="large"
               type="primary"

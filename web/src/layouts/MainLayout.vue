@@ -1,13 +1,12 @@
 <script lang="ts" setup>
-import {ref, computed} from 'vue'
-import {useRouter, useRoute} from 'vue-router'
-import type {RouteRecordRaw} from 'vue-router'
-import {Document, UploadFilled, MagicStick} from '@element-plus/icons-vue'
+import {computed, ref} from 'vue'
+import {useRoute, useRouter} from 'vue-router'
+import {ChatDotRound, Document, Folder, MagicStick, UploadFilled} from '@element-plus/icons-vue'
 
 /**
  * 主布局组件
  * - 企业后台布局：顶部 Header + 左侧 Sidebar + 主内容区
- * - 侧边栏菜单固定三项：表单管理 / 文件上传 / AI自动填报
+ * - 侧边栏菜单：项目管理 / 表单管理 / 文件上传 / AI自动填报 / 智能对话
  * - HealthController 不生成菜单
  */
 const router = useRouter()
@@ -20,7 +19,9 @@ const isCollapse = ref(false)
 const iconMap: Record<string, any> = {
   Document,
   UploadFilled,
-  MagicStick
+  MagicStick,
+  Folder,
+  ChatDotRound
 }
 
 // 菜单项配置（仅展示非 hidden 路由）
@@ -31,14 +32,17 @@ interface MenuItem {
 }
 
 const menuItems: MenuItem[] = [
+  {index: '/project/list', title: '项目管理', icon: 'Folder'},
   {index: '/form/list', title: '表单管理', icon: 'Document'},
   {index: '/file/upload', title: '文件上传', icon: 'UploadFilled'},
-  {index: '/fill/index', title: 'AI自动填报', icon: 'MagicStick'}
+  {index: '/fill/index', title: 'AI自动填报', icon: 'MagicStick'},
+  {index: '/assistant', title: '智能对话', icon: 'ChatDotRound'}
 ]
 
 // 当前激活菜单
 const activeMenu = computed(() => {
-  // 详情页激活表单管理
+  // 详情页/新建页激活对应列表菜单
+  if (route.path.startsWith('/project')) return '/project/list'
   if (route.path.startsWith('/form')) return '/form/list'
   if (route.path.startsWith('/file')) return '/file/upload'
   if (route.path.startsWith('/fill')) return '/fill/index'

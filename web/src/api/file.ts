@@ -12,18 +12,25 @@ import type {FileRecordVO, FileUploadVO} from '@/types/file'
  * - 手动控制 FormData，不依赖 el-upload 默认上传行为
  * - 支持上传进度回调，便于 UI 展示进度条
  *
- * @param file      待上传的 File 对象
- * @param onProgress 可选，接收 0-100 的百分比
+ * @param file    待上传的 File 对象
+ * @param options 可选：projectId（项目归属，后端 UploadFileDTO 字符串序列化，无效项目返回 6007）、onProgress（接收 0-100 的百分比）
  */
-export function uploadFile(file: File, onProgress?: (percent: number) => void) {
+export function uploadFile(
+    file: File,
+    options?: { projectId?: string; onProgress?: (percent: number) => void }
+) {
     const formData = new FormData()
     formData.append('file', file)
+    // 项目归属（可选；无则不归属任何项目）
+    if (options?.projectId) {
+        formData.append('projectId', options.projectId)
+    }
 
     return post<FileUploadVO>('/file/upload', formData, {
         headers: {'Content-Type': 'multipart/form-data'},
         onUploadProgress: (e) => {
-            if (onProgress && e.total) {
-                onProgress(Math.round((e.loaded * 100) / e.total))
+            if (options?.onProgress && e.total) {
+                options.onProgress(Math.round((e.loaded * 100) / e.total))
             }
         }
     })

@@ -87,6 +87,31 @@ class AsyncParseExecutorTest {
         verify(fieldExtractorService, never()).extract(any(), any(), any());
     }
 
+    /**
+     * 历史兼容（需求 §三十一 4/5 + §十）：projectId=null 的旧链路保持历史行为——
+     * extract 收到 (null, formId, fileId) 三参调用（内部由 FieldExtractorService
+     * 按 fileId 兜底解析 projectId，跳过项目域持久化），且四阶段进度与成功语义
+     * （0/50/80/100 + SUCCESS 携带 result）与项目维度链路完全一致。
+     */
+    @Test
+    void run_legacyNullProjectId_passesThroughAndPublishesFourStages() {
+        stubIngestWithCallback();
+        ExtractionResult result = buildResult();
+        when(fieldExtractorService.extract(null, FORM_ID, FILE_ID)).thenReturn(result);
+
+        executor.run("task-3", null, FORM_ID, FILE_ID);
+
+        // 真实行为验证：四阶段进度 + 最终 SUCCESS 状态携带结果（约束 2）
+        List<TaskProgress> published = capturePublished();
+        assertThat(published).extracting(TaskProgress::getPercent)
+                .containsExactly(0, 50, 80, 100);
+        assertThat(published).extracting(TaskProgress::getStatus)
+                .containsExactly("PARSING", "VECTORING", "EXTRACTING", "SUCCESS");
+        assertThat(published.get(3).getResult()).isSameAs(result);
+        // projectId=null 原样透传给抽取服务，不臆造默认值（历史兜底在 FieldExtractorService 内）
+        verify(fieldExtractorService).extract(null, FORM_ID, FILE_ID);
+    }
+
     // ==================== 测试辅助 ====================
 
     /**

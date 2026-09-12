@@ -74,4 +74,6 @@ export interface FileRecordVO {
     status: FileStatus
     createTime: string
     updateTime?: string
+    /** 所属项目ID（可空；未关联项目时为空。已归属其他项目的文件不可重复关联） */
+    projectId?: number | string
 }

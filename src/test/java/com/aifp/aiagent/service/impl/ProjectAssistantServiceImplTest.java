@@ -22,10 +22,14 @@ import org.springframework.ai.chat.model.Generation;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.document.Document;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import reactor.core.publisher.Flux;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Executor;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -34,22 +38,30 @@ import static org.mockito.Mockito.anyInt;
 import static org.mockito.Mockito.*;
 
 /**
- * {@link ProjectAssistantServiceImpl} 测试（离线，Phase 8 T4 / Phase 9 会话编排适配）
+ * {@link ProjectAssistantServiceImpl} 测试（离线，Phase 8 T4 / Phase 9 会话编排 /
+ * Phase K 流式输出适配）
  * <p>
- * Phase 8 覆盖：参数防御 400；守门 403/6001 透传；UNSUPPORTED 真短路（追加约束 5，
- * verify 零 LLM/零检索/零事实查询/零文件清单）；五意图数据源路由（STRUCTURED 恒
- * facts+RAG 追加约束 2）；conversationId 空生成/非空透传（追加约束 8 无状态）；
- * 回答 LLM 异常/空白 → 3001 不重进 RAG（追加约束 11）；references/structuredData/
- * usedFiles 组装（追加约束 3/12，后端组装非 LLM 生成）。
+ * Phase 8 覆盖：参数防御 400；守门 403/6001 透传（同步抛出，SSE 连接建立前）；
+ * UNSUPPORTED 真短路（追加约束 5，verify 零 LLM/零检索/零事实查询/零文件清单）；
+ * 五意图数据源路由（STRUCTURED 恒 facts+RAG 追加约束 2）；conversationId 空生成/
+ * 非空透传；回答 LLM 异常/空白 → error 事件收尾不重进 RAG（追加约束 11）；
+ * references/structuredData/usedFiles 组装（追加约束 3/12，后端组装非 LLM 生成）。
  * <p>
  * Phase 9 追加覆盖：历史按 max-injected-turns 读取并按时间序传入意图识别（约束 3）；
  * standaloneQuestion 同时用于 RAG query 与回答 Prompt、原始 message 忠实入历史（约束 2）；
- * UNSUPPORTED 记录实际返回固定文案、3001 失败零轮次记录（约束 5）；成功轮次后置
+ * UNSUPPORTED 记录实际返回固定文案、失败零轮次记录（约束 5）；成功轮次后置
  * appendTurn（约束 4）。
  * <p>
  * Phase 11 追加覆盖：answer 行内引用标记 → citations 实际引用子集（首次出现顺序
  * 去重、与 references 共享实例）；未知标记仅忽略不影响主回答（约束 2/3）；
  * answer 保留标记不剥离（约束 12）。
+ * <p>
+ * Phase K 流式覆盖：SSE 事件协议 delta（{"delta":"..."}）→ final（完整响应）/
+ * error（{"message":"..."}）；流式 LLM 每块增量各推送一个 delta 事件、聚合文本
+ * 作为 final 响应；守门失败同步抛出（HTTP JSON），编排失败 error 事件 + complete
+ * 兜底收敛。测试通过「捕获线程池提交的编排任务 + 拦截 sendEvent 测试缝」模式
+ * 离线断言事件序列（ResponseBodyEmitter.Handler 为包私有 SPI 不可跨包实现，
+ * 真实 SseEmitter 不发送任何数据，不启 Spring 上下文）。
  * QueryPlanner/PromptBuilder/AnswerCitationParser/ChunkMetadataReader 为纯函数/
  * 渲染组件使用真实实例。
  *
@@ -83,6 +95,11 @@ class ProjectAssistantServiceImplTest {
 
     private ProjectAssistantServiceImpl service;
 
+    /**
+     * sendEvent 拦截记录（Phase K 测试缝）：记录 (eventName, payload) 事件序列
+     */
+    private final List<SentEvent> recordedEvents = new ArrayList<>();
+
     @BeforeEach
     void setUp() {
         service = new ProjectAssistantServiceImpl(
@@ -90,19 +107,26 @@ class ProjectAssistantServiceImplTest {
                 queryIntentAnalyzer, new QueryPlanner(),
                 new AssistantPromptBuilder(new ChunkMetadataReader()),
                 new AnswerCitationParser(), conversationHistoryStore,
-                comparisonService, chatModel);
+                comparisonService, chatModel) {
+            @Override
+            protected void sendEvent(SseEmitter emitter, String eventName, Object payload) {
+                recordedEvents.add(new SentEvent(eventName, payload));
+            }
+        };
         ReflectionTestUtils.setField(service, "assistantTopK", 5);
         ReflectionTestUtils.setField(service, "maxInjectedTurns", 6);
+        // 默认直跑执行器：守门失败类用例在 chatStream 同步段抛出，不会触达线程池
+        ReflectionTestUtils.setField(service, "assistantStreamExecutor", (Executor) Runnable::run);
     }
 
-    // ==================== 参数防御与守门 ====================
+    // ==================== 参数防御与守门（同步段，HTTP JSON） ====================
 
     /**
-     * message 空白 → 400，快速失败不触碰任何依赖
+     * message 空白 → 400，快速失败不触碰任何依赖（SSE 连接未建立，走 HTTP JSON）
      */
     @Test
-    void chat_blankMessage_throwsParamError400() {
-        assertThatThrownBy(() -> service.chat(PROJECT_ID, req("   ")))
+    void chatStream_blankMessage_throwsParamError400() {
+        assertThatThrownBy(() -> service.chatStream(PROJECT_ID, req("   ")))
                 .isInstanceOfSatisfying(BusinessException.class, e ->
                         assertThat(e.getCode()).isEqualTo(ResultCode.PARAM_ERROR.getCode()));
         verifyNoInteractions(projectService, projectQueryService,
@@ -113,10 +137,10 @@ class ProjectAssistantServiceImplTest {
      * 守门唯一入口 ProjectService（403）：意图识别前拦截
      */
     @Test
-    void chat_accessDenied_propagates403() {
+    void chatStream_accessDenied_propagates403() {
         when(projectService.getProjectById(PROJECT_ID)).thenThrow(new BusinessException(ResultCode.FORBIDDEN));
 
-        assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
+        assertThatThrownBy(() -> service.chatStream(PROJECT_ID, req(MESSAGE)))
                 .isInstanceOfSatisfying(BusinessException.class, e ->
                         assertThat(e.getCode()).isEqualTo(ResultCode.FORBIDDEN.getCode()));
         verifyNoInteractions(queryIntentAnalyzer, projectQueryService,
@@ -127,11 +151,11 @@ class ProjectAssistantServiceImplTest {
      * 守门唯一入口 ProjectService（6001）
      */
     @Test
-    void chat_projectMissing_propagates6001() {
+    void chatStream_projectMissing_propagates6001() {
         when(projectService.getProjectById(PROJECT_ID)).thenThrow(
                 new BusinessException(ResultCode.PROJECT_NOT_FOUND));
 
-        assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
+        assertThatThrownBy(() -> service.chatStream(PROJECT_ID, req(MESSAGE)))
                 .isInstanceOfSatisfying(BusinessException.class, e ->
                         assertThat(e.getCode()).isEqualTo(ResultCode.PROJECT_NOT_FOUND.getCode()));
         // 守门前零 Redis 访问（追加约束 6）
@@ -139,21 +163,27 @@ class ProjectAssistantServiceImplTest {
                 projectRetrievalService, conversationHistoryStore, chatModel);
     }
 
+    // ==================== SSE 流式编排（异步段，事件协议） ====================
+
     /**
-     * 意图识别 ChatModel 异常（3001）直接上抛，不进入任何检索；
+     * 意图识别 ChatModel 异常（3001）→ error 事件收尾，不进入任何检索；
      * 追加约束 5：模型失败零轮次记录
      */
     @Test
-    void chat_intentAnalyzerFailure_propagates3001() {
+    @SuppressWarnings("unchecked")
+    void chatStream_intentAnalyzerFailure_errorEventAndNoRag() {
         when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
         when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), anyString(), eq(6)))
                 .thenReturn(List.of());
         when(queryIntentAnalyzer.analyze(eq(MESSAGE), eq("示范项目"), anyList())).thenThrow(
                 new BusinessException(ResultCode.AI_INVOKE_ERROR, "AI 意图识别调用失败"));
 
-        assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
-                .isInstanceOfSatisfying(BusinessException.class, e ->
-                        assertThat(e.getCode()).isEqualTo(ResultCode.AI_INVOKE_ERROR.getCode()));
+        List<SentEvent> events = runChat(req(MESSAGE));
+
+        assertThat(events).hasSize(1);
+        assertThat(events.get(0).name()).isEqualTo("error");
+        assertThat(((Map<String, String>) events.get(0).payload()).get("message"))
+                .isEqualTo("AI 意图识别调用失败");
         verify(conversationHistoryStore, never())
                 .appendTurn(any(), anyString(), anyString(), anyString());
         verifyNoInteractions(projectQueryService, projectRetrievalService, chatModel);
@@ -162,19 +192,19 @@ class ProjectAssistantServiceImplTest {
     // ==================== UNSUPPORTED 真短路（追加约束 5/14） ====================
 
     /**
-     * UNSUPPORTED → 意图识别后立即返回确定性文案，零 LLM 零检索零事实查询零文件清单；
-     * Phase 10 文案收窄（追加约束 13）：仅归因分析不支持；追加约束 5：记录真实交互
-     * （assistantAnswer = 实际返回给用户的固定文案）
+     * UNSUPPORTED → 意图识别后立即 final 事件返回确定性文案，零 LLM 零检索零事实查询
+     * 零文件清单；Phase 10 文案收窄（追加约束 13）：仅归因分析不支持；追加约束 5：
+     * 记录真实交互（assistantAnswer = 实际返回给用户的固定文案）
      */
     @Test
-    void chat_unsupported_shortCircuitWithDeterministicAnswer() {
+    void chatStream_unsupported_shortCircuitWithDeterministicAnswer() {
         when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
         when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), anyString(), eq(6)))
                 .thenReturn(List.of());
         when(queryIntentAnalyzer.analyze(eq(MESSAGE), eq("示范项目"), anyList()))
                 .thenReturn(analysis(AssistantIntent.UNSUPPORTED));
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+        AssistantChatResponse resp = finalResponseOf(runChat(req(MESSAGE)));
 
         assertThat(resp.getAnswer())
                 .contains("当前版本暂不支持项目之间的归因分析与原因解释");
@@ -196,13 +226,13 @@ class ProjectAssistantServiceImplTest {
      * structuredData/references/usedFiles 全部后端组装
      */
     @Test
-    void chat_structured_factsAndRagAlwaysFetched() {
+    void chatStream_structured_factsAndRagAlwaysFetched() {
         stubCommon(AssistantIntent.STRUCTURED);
         stubRag(List.of());
         stubAnswer("总投资约100万元。");
         when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+        AssistantChatResponse resp = finalResponseOf(runChat(req(MESSAGE)));
 
         verify(projectRetrievalService).retrieve(PROJECT_ID, MESSAGE, 5);
         verify(projectService, never()).listProjectFiles(any(), any());
@@ -230,12 +260,12 @@ class ProjectAssistantServiceImplTest {
      * （String 化 fileId/fileName/pageStart 由 ChunkMetadataReader 解析）
      */
     @Test
-    void chat_document_ragOnlyWithFileReferences() {
+    void chatStream_document_ragOnlyWithFileReferences() {
         stubCommon(AssistantIntent.DOCUMENT);
         stubRag(List.of(ragDoc()));
         stubAnswer("总投资约100万元。");
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+        AssistantChatResponse resp = finalResponseOf(runChat(req(MESSAGE)));
 
         verifyNoInteractions(projectQueryService);
         verify(projectService, never()).listProjectFiles(any(), any());
@@ -255,13 +285,13 @@ class ProjectAssistantServiceImplTest {
      */
     @Test
     @SuppressWarnings("unchecked")
-    void chat_fileList_fileNamesOnly() {
+    void chatStream_fileList_fileNamesOnly() {
         stubCommon(AssistantIntent.FILE_LIST);
         stubAnswer("总投资约100万元。");
         when(projectService.listProjectFiles(eq(PROJECT_ID), any(PageQuery.class)))
                 .thenReturn(filesPage());
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+        AssistantChatResponse resp = finalResponseOf(runChat(req(MESSAGE)));
 
         ArgumentCaptor<PageQuery> captor = ArgumentCaptor.forClass(PageQuery.class);
         verify(projectService).listProjectFiles(eq(PROJECT_ID), captor.capture());
@@ -278,13 +308,13 @@ class ProjectAssistantServiceImplTest {
      * UNKNOWN → 保守降级事实 + RAG 双通道（§十六）
      */
     @Test
-    void chat_unknown_factsAndRag() {
+    void chatStream_unknown_factsAndRag() {
         stubCommon(AssistantIntent.UNKNOWN);
         stubRag(List.of());
         stubAnswer("总投资约100万元。");
         when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
 
-        service.chat(PROJECT_ID, req(MESSAGE));
+        runChat(req(MESSAGE));
 
         verify(projectQueryService).queryProjectFacts(PROJECT_ID);
         verify(projectRetrievalService).retrieve(PROJECT_ID, MESSAGE, 5);
@@ -294,13 +324,13 @@ class ProjectAssistantServiceImplTest {
      * HYBRID → 事实 + RAG
      */
     @Test
-    void chat_hybrid_factsAndRag() {
+    void chatStream_hybrid_factsAndRag() {
         stubCommon(AssistantIntent.HYBRID);
         stubRag(List.of());
         stubAnswer("总投资约100万元。");
         when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
 
-        service.chat(PROJECT_ID, req(MESSAGE));
+        runChat(req(MESSAGE));
 
         verify(projectQueryService).queryProjectFacts(PROJECT_ID);
         verify(projectRetrievalService).retrieve(PROJECT_ID, MESSAGE, 5);
@@ -310,11 +340,11 @@ class ProjectAssistantServiceImplTest {
 
     /**
      * COMPARISON 成功路径：比较编排先行（不拉单项目全量事实）→ RAG 仅解释依据 →
-     * 最终 LLM 只能引用已算结果；comparisonData 返回、比较证据并入
+     * 最终 LLM 流式回答（delta 增量）；comparisonData 返回、比较证据并入
      * references/usedFiles、usedProjects = 当前 ∪ 目标（追加约束 6/9/11）
      */
     @Test
-    void chat_comparison_success_returnsComparisonDataWithEvidence() {
+    void chatStream_comparison_success_returnsComparisonDataWithEvidence() {
         stubCommon(AssistantIntent.COMPARISON);
         CrossProjectComparisonVO comparison = comparisonVO();
         when(comparisonService.compare(PROJECT_ID, MESSAGE))
@@ -322,7 +352,7 @@ class ProjectAssistantServiceImplTest {
         stubRag(List.of(ragDoc()));
         stubAnswer("项目B投资最高。");
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+        AssistantChatResponse resp = finalResponseOf(runChat(req(MESSAGE)));
 
         // 比较编排先行；单项目全量事实零查询（字段级事实由比较服务内部拉取）
         verify(comparisonService).compare(PROJECT_ID, MESSAGE);
@@ -348,17 +378,17 @@ class ProjectAssistantServiceImplTest {
     }
 
     /**
-     * COMPARISON 降级路径（追加约束 2/12）：确定性文案直接返回——零后续 RAG、
-     * 零最终 LLM、零事实查询；comparisonData=null；确定性答案忠实入历史
+     * COMPARISON 降级路径（追加约束 2/12）：确定性文案直接 final 事件返回——零后续
+     * RAG、零最终 LLM、零事实查询；comparisonData=null；确定性答案忠实入历史
      */
     @Test
-    void chat_comparison_fallback_deterministicAnswerWithoutRagOrLlm() {
+    void chatStream_comparison_fallback_deterministicAnswerWithoutRagOrLlm() {
         stubCommon(AssistantIntent.COMPARISON);
         String fallback = "无法确定比较范围：问题未明确参与比较的项目，请补充项目名称。";
         when(comparisonService.compare(PROJECT_ID, MESSAGE))
                 .thenReturn(ProjectComparisonService.ComparisonOutcome.fallback(fallback));
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+        AssistantChatResponse resp = finalResponseOf(runChat(req(MESSAGE)));
 
         assertThat(resp.getAnswer()).isEqualTo(fallback);
         assertThat(resp.getComparisonData()).isNull();
@@ -378,13 +408,13 @@ class ProjectAssistantServiceImplTest {
      * 与 references 共享同一 VO 实例；answer 保留标记不剥离（约束 12）
      */
     @Test
-    void chat_citationsParsedFromAnswerMarkers() {
+    void chatStream_citationsParsedFromAnswerMarkers() {
         stubCommon(AssistantIntent.STRUCTURED);
         stubRag(List.of());
         stubAnswer("总投资约100万元[S1]，另一记载为200万元[S2]。[S1]再次出现。");
         when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+        AssistantChatResponse resp = finalResponseOf(runChat(req(MESSAGE)));
 
         // references = 全量证据（facts 两条来源值 S1/S2）
         assertThat(resp.getReferences()).extracting(AssistantReferenceVO::getCitationId)
@@ -402,13 +432,13 @@ class ProjectAssistantServiceImplTest {
      * 不创建新证据项、不改变 references，主回答原样返回不受影响（约束 2/3）
      */
     @Test
-    void chat_unknownCitationMarkersIgnored_answerUnaffected() {
+    void chatStream_unknownCitationMarkersIgnored_answerUnaffected() {
         stubCommon(AssistantIntent.STRUCTURED);
         stubRag(List.of());
         stubAnswer("总投资约100万元[S1]；编造[S99]与历史[D9]。");
         when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+        AssistantChatResponse resp = finalResponseOf(runChat(req(MESSAGE)));
 
         assertThat(resp.getReferences()).hasSize(2);
         assertThat(resp.getCitations()).hasSize(1);
@@ -419,19 +449,21 @@ class ProjectAssistantServiceImplTest {
     // ==================== 回答 LLM 错误边界（追加约束 11） ====================
 
     /**
-     * 回答 ChatModel 异常 → 3001，禁止降级 UNKNOWN 或重进 RAG
+     * 回答 ChatModel 流式调用异常 → error 事件（3001 文案），禁止降级 UNKNOWN 或重进 RAG
      */
     @Test
-    void chat_answerModelFailure_throwsAiInvokeError3001() {
+    void chatStream_answerModelFailure_errorEventNoRetry() {
         stubCommon(AssistantIntent.STRUCTURED);
         stubRag(List.of());
         when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
         // 回答桩覆盖验证：异常路径不依赖 stubAnswer
-        when(chatModel.call(any(Prompt.class))).thenThrow(new RuntimeException("timeout"));
+        when(chatModel.stream(any(Prompt.class))).thenThrow(new RuntimeException("timeout"));
 
-        assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
-                .isInstanceOfSatisfying(BusinessException.class, e ->
-                        assertThat(e.getCode()).isEqualTo(ResultCode.AI_INVOKE_ERROR.getCode()));
+        List<SentEvent> events = runChat(req(MESSAGE));
+
+        SentEvent last = events.get(events.size() - 1);
+        assertThat(last.name()).isEqualTo("error");
+        assertThat(((Map<String, String>) last.payload()).get("message")).isEqualTo("AI 回答调用失败");
         // 不重试：事实与检索各只查询一次
         verify(projectQueryService, times(1)).queryProjectFacts(PROJECT_ID);
         verify(projectRetrievalService, times(1)).retrieve(any(Long.class), any(), anyInt());
@@ -441,35 +473,68 @@ class ProjectAssistantServiceImplTest {
     }
 
     /**
-     * 回答空白 → 3001（"AI 未返回有效回答"），不重进 RAG
+     * 回答空白 → error 事件（"AI 未返回有效回答"），不重进 RAG
      */
     @Test
-    void chat_blankAnswer_throwsAiInvokeError3001() {
+    @SuppressWarnings("unchecked")
+    void chatStream_blankAnswer_errorEvent() {
         stubCommon(AssistantIntent.STRUCTURED);
         stubRag(List.of());
         when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
-        when(chatModel.call(any(Prompt.class))).thenReturn(chatResponse("   "));
+        when(chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chatResponse("   ")));
 
-        assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
-                .isInstanceOfSatisfying(BusinessException.class, e ->
-                        assertThat(e.getCode()).isEqualTo(ResultCode.AI_INVOKE_ERROR.getCode()));
+        List<SentEvent> events = runChat(req(MESSAGE));
+
+        SentEvent last = events.get(events.size() - 1);
+        assertThat(last.name()).isEqualTo("error");
+        assertThat(((Map<String, String>) last.payload()).get("message")).isEqualTo("AI 未返回有效回答");
         verify(conversationHistoryStore, never())
                 .appendTurn(any(), anyString(), anyString(), anyString());
+    }
+
+    // ==================== Phase K 流式增量（delta 协议） ====================
+
+    /**
+     * 流式 LLM 每块增量各推送一个 delta 事件（顺序保序），聚合完整回答作为 final
+     * 响应返回；delta 先于 final（前端占位消息按序渲染）
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void chatStream_streamedChunks_pushDeltaEventsBeforeFinal() {
+        stubCommon(AssistantIntent.STRUCTURED);
+        stubRag(List.of());
+        when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
+        when(chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(
+                chatResponse("总投资约"), chatResponse("100万元。")));
+
+        List<SentEvent> events = runChat(req(MESSAGE));
+
+        assertThat(events).hasSize(3);
+        assertThat(events.get(0).name()).isEqualTo("delta");
+        assertThat(((Map<String, String>) events.get(0).payload()).get("delta")).isEqualTo("总投资约");
+        assertThat(events.get(1).name()).isEqualTo("delta");
+        assertThat(((Map<String, String>) events.get(1).payload()).get("delta")).isEqualTo("100万元。");
+        assertThat(events.get(2).name()).isEqualTo("final");
+        assertThat(((AssistantChatResponse) events.get(2).payload()).getAnswer())
+                .isEqualTo("总投资约100万元。");
+        // 完整回答后置入历史
+        verify(conversationHistoryStore).appendTurn(
+                eq(PROJECT_ID), anyString(), eq(MESSAGE), eq("总投资约100万元。"));
     }
 
     // ==================== 会话无状态（追加约束 8） ====================
 
     /**
-     * conversationId 空白 → 服务端生成 UUID（不读 ChatMemory，无状态）
+     * conversationId 空白 → 服务端生成 UUID（chatStream 同步段解析后透传编排）
      */
     @Test
-    void chat_blankConversationId_generatesUuid() {
+    void chatStream_blankConversationId_generatesUuid() {
         stubCommon(AssistantIntent.FILE_LIST);
         stubAnswer("总投资约100万元。");
         when(projectService.listProjectFiles(eq(PROJECT_ID), any(PageQuery.class)))
                 .thenReturn(PageResult.empty());
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+        AssistantChatResponse resp = finalResponseOf(runChat(req(MESSAGE)));
 
         assertThat(resp.getConversationId()).isNotBlank();
         assertThat(UUID.fromString(resp.getConversationId())).isNotNull();
@@ -479,7 +544,7 @@ class ProjectAssistantServiceImplTest {
      * conversationId 非空 → 原样透传
      */
     @Test
-    void chat_givenConversationId_passedThrough() {
+    void chatStream_givenConversationId_passedThrough() {
         stubCommon(AssistantIntent.FILE_LIST);
         stubAnswer("总投资约100万元。");
         when(projectService.listProjectFiles(eq(PROJECT_ID), any(PageQuery.class)))
@@ -487,7 +552,7 @@ class ProjectAssistantServiceImplTest {
         AssistantChatRequest request = req(MESSAGE);
         request.setConversationId("conv-001");
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, request);
+        AssistantChatResponse resp = finalResponseOf(runChat(request));
 
         assertThat(resp.getConversationId()).isEqualTo("conv-001");
     }
@@ -499,7 +564,7 @@ class ProjectAssistantServiceImplTest {
      */
     @Test
     @SuppressWarnings({"unchecked", "rawtypes"})
-    void chat_historyQuestionsPassedToIntentAnalyzerInOrder() {
+    void chatStream_historyQuestionsPassedToIntentAnalyzerInOrder() {
         when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
         when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), eq("conv-001"), eq(6)))
                 .thenReturn(List.of(
@@ -513,7 +578,7 @@ class ProjectAssistantServiceImplTest {
         AssistantChatRequest request = req(MESSAGE);
         request.setConversationId("conv-001");
 
-        service.chat(PROJECT_ID, request);
+        runChat(request);
 
         ArgumentCaptor<List<String>> captor = ArgumentCaptor.forClass((Class) List.class);
         verify(queryIntentAnalyzer).analyze(eq(MESSAGE), eq("示范项目"), captor.capture());
@@ -529,7 +594,7 @@ class ProjectAssistantServiceImplTest {
      * 用户问题均使用改写值；原始 message 仅忠实入历史记录
      */
     @Test
-    void chat_rewrite_standaloneQuestionUsedForRagAndPrompt() {
+    void chatStream_rewrite_standaloneQuestionUsedForRagAndPrompt() {
         String rewritten = "这个项目的建筑面积是多少？";
         when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
         when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), eq("conv-001"), eq(6)))
@@ -542,13 +607,13 @@ class ProjectAssistantServiceImplTest {
         AssistantChatRequest request = req("那面积呢？");
         request.setConversationId("conv-001");
 
-        AssistantChatResponse resp = service.chat(PROJECT_ID, request);
+        AssistantChatResponse resp = finalResponseOf(runChat(request));
 
         // RAG query 使用改写问题（非原始"那面积呢？"）
         verify(projectRetrievalService).retrieve(PROJECT_ID, rewritten, 5);
         // 回答 Prompt 用户问题 = 同一个改写问题
         ArgumentCaptor<Prompt> promptCaptor = ArgumentCaptor.forClass(Prompt.class);
-        verify(chatModel).call(promptCaptor.capture());
+        verify(chatModel).stream(promptCaptor.capture());
         assertThat(userTextOf(promptCaptor.getValue()))
                 .contains("用户问题：这个项目的建筑面积是多少？")
                 .doesNotContain("用户问题：那面积呢？");
@@ -563,7 +628,7 @@ class ProjectAssistantServiceImplTest {
      * （仅指代消解语境，事实依据由本次 facts/RAG 提供）
      */
     @Test
-    void chat_historyRenderedInAnswerPrompt() {
+    void chatStream_historyRenderedInAnswerPrompt() {
         when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
         when(conversationHistoryStore.loadRecentTurns(eq(PROJECT_ID), eq("conv-001"), eq(6)))
                 .thenReturn(List.of(turn("这个项目总投资是多少？", "总投资约100万元。")));
@@ -575,10 +640,10 @@ class ProjectAssistantServiceImplTest {
         AssistantChatRequest request = req(MESSAGE);
         request.setConversationId("conv-001");
 
-        service.chat(PROJECT_ID, request);
+        runChat(request);
 
         ArgumentCaptor<Prompt> promptCaptor = ArgumentCaptor.forClass(Prompt.class);
-        verify(chatModel).call(promptCaptor.capture());
+        verify(chatModel).stream(promptCaptor.capture());
         assertThat(userTextOf(promptCaptor.getValue()))
                 .contains("【对话历史】（仅用于理解当前问题的指代关系，不是项目事实来源）")
                 .contains("用户：这个项目总投资是多少？")
@@ -586,6 +651,37 @@ class ProjectAssistantServiceImplTest {
     }
 
     // ==================== 测试辅助 ====================
+
+    /**
+     * 启动流式对话并同步执行编排（Phase K 测试模式）：捕获线程池提交的编排任务 →
+     * 运行任务 → 返回记录的事件序列（sendEvent 已被匿名子类拦截，真实 SseEmitter
+     * 不发送任何数据，无需初始化，不启 Spring 上下文、无真实网络 IO）。
+     */
+    private List<SentEvent> runChat(AssistantChatRequest request) {
+        recordedEvents.clear();
+        List<Runnable> submitted = new ArrayList<>();
+        ReflectionTestUtils.setField(service, "assistantStreamExecutor", (Executor) submitted::add);
+        service.chatStream(PROJECT_ID, request);
+        submitted.forEach(Runnable::run);
+        return recordedEvents;
+    }
+
+    /**
+     * 提取 final 事件载荷（AssistantChatResponse），并断言存在且唯一
+     */
+    private AssistantChatResponse finalResponseOf(List<SentEvent> events) {
+        List<SentEvent> finals = events.stream()
+                .filter(e -> "final".equals(e.name())).toList();
+        assertThat(finals).hasSize(1);
+        return (AssistantChatResponse) finals.get(0).payload();
+    }
+
+    /**
+     * 回答 LLM 流式输出打桩（Phase K）：单块增量 = 完整文本
+     */
+    private void stubAnswer(String text) {
+        when(chatModel.stream(any(Prompt.class))).thenReturn(Flux.just(chatResponse(text)));
+    }
 
     /**
      * 公共正向打桩：守门 + 会话历史（首轮空历史）+ 意图识别（检索/事实/清单/LLM
@@ -631,10 +727,9 @@ class ProjectAssistantServiceImplTest {
     }
 
     /**
-     * 回答 LLM 正常输出打桩
+     * 已录制 SSE 事件（name=事件名，payload=sendEvent 收到的原始载荷对象）
      */
-    private void stubAnswer(String text) {
-        when(chatModel.call(any(Prompt.class))).thenReturn(chatResponse(text));
+    private record SentEvent(String name, Object payload) {
     }
 
     /**

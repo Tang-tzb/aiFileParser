@@ -14,15 +14,26 @@ export interface LastUpload {
     fileName: string
     fileType: string
     createTime: string
+    /** 归属项目 ID（未关联项目时为空；AI 填报预填时需与所选项目一致，防止串项目） */
+    projectId?: string
+    /** 归属项目名称 */
+    projectName?: string
 }
 
-/** 保存最近一次上传成功记录（fileId 统一转字符串） */
-export function setLastUpload(vo: FileUploadVO): void {
+/** 保存最近一次上传成功记录（fileId 统一转字符串；传入 project 时写入项目归属） */
+export function setLastUpload(
+    vo: FileUploadVO,
+    project?: { projectId: string; projectName: string }
+): void {
     const record: LastUpload = {
         fileId: String(vo.fileId),
         fileName: vo.fileName,
         fileType: String(vo.fileType),
         createTime: vo.createTime
+    }
+    if (project?.projectId) {
+        record.projectId = String(project.projectId)
+        record.projectName = project.projectName ?? ''
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(record))
 }
