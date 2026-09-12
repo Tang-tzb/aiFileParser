@@ -1,24 +1,31 @@
 package com.aifp.aiagent.assistant;
 
+import com.aifp.aiagent.dto.AssistantReferenceVO;
 import com.aifp.aiagent.dto.CrossProjectComparisonVO;
 import com.aifp.aiagent.dto.ProjectStructuredFactsVO;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.document.Document;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
- * 项目助手回答 Prompt 构建器（需求 §二十二/§二十三；Phase 9 增加对话历史段）
+ * 项目助手回答 Prompt 构建器（需求 §二十二/§二十三；Phase 9 增加对话历史段；
+ * Phase 11 增加证据编号登记与引用溯源）
  * <p>
  * System Prompt = 反伪造规则常量（追加约束 1/6/9/12/14 + 硬约束 ⑧ 冲突不裁决 +
- * Phase 9 追加约束 1 历史非事实源）；
+ * Phase 9 追加约束 1 历史非事实源 + Phase 11 第 12 条行内引用标记规则）；
  * User Prompt = 按上下文分段渲染（空段整段省略）：对话历史（指代消解语境）/
  * 结构化字段事实（冲突显式标记 + 逐来源明细）/ 项目文件清单 / 文档检索结果
- * （[D{n}] 编号，与 ExtractionPromptBuilder [C{n}] 同风格，修改编号语义需互相同步）。
+ * （编号与 ExtractionPromptBuilder [C{n}] 同风格，修改编号语义需互相同步）。
  * <p>
- * 职责边界（追加约束 10/12）：只做数据渲染，不解析业务数字、不组装响应 VO；
- * 回答保持纯自然语言，references/structuredData/usedFiles 全部由后端代码组装。
+ * 职责边界（追加约束 10/12；Phase 11 调整）：渲染与证据登记一体完成——每条注入
+ * Prompt 的证据（比较单元/排除值/结构化来源值/文档切片）在渲染时同步登记为
+ * {@link AssistantReferenceVO} 并分配 citationId（[S{n}]/[D{n}]），
+ * {@link PromptBuildResult#evidence()} 与 userPrompt 中的标记严格一一对应；
+ * 不解析业务数字、不组装响应 VO（references/citations/usedFiles 由 ServiceImpl
+ * 从 evidence 组装）；回答保持纯自然语言 + 行内引用标记。
  *
  * @author Tang_tzb
  */
@@ -27,14 +34,15 @@ import java.util.List;
 public class AssistantPromptBuilder {
 
     /**
-     * 文档片段行前缀（编号与 ExtractionPromptBuilder 的 [C{n}] 同风格）
+     * 文档片段行前缀（%s = citationId，如 D1；编号与 ExtractionPromptBuilder 的
+     * [C{n}] 同风格）
      */
-    private static final String DOC_MARKER_FORMAT = "[D%d] 来源: %s%s%n%s";
+    private static final String DOC_MARKER_FORMAT = "[%s] 来源: %s%s%n%s";
 
     /**
      * 反伪造 System Prompt（§二十三 1-10 条全量；措辞为追加约束 1 原文要求，
      * 修改需同步评估 Prompt 效果与单元测试断言；Phase 10 调整第 8 条归因范围 +
-     * 新增第 11 条比较数据唯一来源规则）
+     * 新增第 11 条比较数据唯一来源规则；Phase 11 新增第 12 条行内引用标记规则）
      */
     private static final String SYSTEM_PROMPT = """
             你是项目资料智能助手，负责回答用户关于当前项目的问题。你必须严格遵守以下规则：
@@ -48,9 +56,31 @@ public class AssistantPromptBuilder {
             8. 涉及项目之间归因分析、原因解释的问题（如为什么某项目投资比其他项目高），如实说明当前版本暂不支持此类能力。
             9. 只输出纯自然语言回答，禁止输出 JSON 或其他结构化格式。
             10. 对话历史仅用于理解当前问题的指代关系（如"那、它、这个项目、还有呢"）；历史中提到的项目事实（金额、面积、日期、单位等）不能作为本次回答的依据，即使上一轮已经回答过，本轮涉及项目事实时仍必须以本次提供的【项目结构化字段事实】【跨项目比较数据】和【文档检索结果】为准。
-            11. 比较、排名、求和、平均、最大、最小、差值、百分比等跨项目数字结论只能引用【跨项目比较数据】中后端已计算的排名与聚合结果（rank/aggregates/diffFromCurrent/diffFromCurrentPercent），禁止自行计算、换算或派生任何数字（包括百分比）；【文档检索结果】中的数字仅可用于解释性表述，禁止作为比较计算依据；被标记为排除（冲突/值无法解析/单位不兼容/无数据）的实例必须如实说明其未参与本次数值计算。""";
+            11. 比较、排名、求和、平均、最大、最小、差值、百分比等跨项目数字结论只能引用【跨项目比较数据】中后端已计算的排名与聚合结果（rank/aggregates/diffFromCurrent/diffFromCurrentPercent），禁止自行计算、换算或派生任何数字（包括百分比）；【文档检索结果】中的数字仅可用于解释性表述，禁止作为比较计算依据；被标记为排除（冲突/值无法解析/单位不兼容/无数据）的实例必须如实说明其未参与本次数值计算。
+            12. 回答中引用任何项目事实或文档内容时，必须在该句末尾紧跟对应证据的引用标记：结构化字段值与比较数据使用其行末的 [S编号]，文档片段使用其行首的 [D编号]（如 [S1]、[D2]）；只允许使用本次提供的证据中实际存在的标记，禁止编造编号或使用不存在的标记；引用标记属于普通文本，不属于结构化格式。""";
 
     private final ChunkMetadataReader chunkMetadataReader;
+
+    /**
+     * 构建 Prompt 并登记证据（Phase 11）：渲染与登记一体完成，userPrompt 中出现的
+     * 每个 [S{n}]/[D{n}] 标记在 evidence 中存在 citationId 完全一致的成员；
+     * 重复 build() 时重新编号，单次构建内编号全局唯一。
+     *
+     * @param ctx 助手上下文（由 ServiceImpl 按 QueryPlan 组装）
+     * @return 用户提示词 + 全量证据（含 citationId）
+     */
+    public PromptBuildResult build(ProjectAssistantContext ctx) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("项目：").append(ctx.getProjectName()).append('\n');
+        sb.append("用户问题：").append(ctx.getQuestion()).append('\n');
+        RenderState state = new RenderState();
+        renderHistory(sb, ctx.getHistory());
+        renderComparison(sb, ctx.getComparison(), state);
+        renderFacts(sb, ctx.getFacts(), state);
+        renderFileList(sb, ctx.getFileNames());
+        renderDocuments(sb, ctx.getDocuments(), state);
+        return new PromptBuildResult(sb.toString(), List.copyOf(state.evidence));
+    }
 
     /**
      * 构建反伪造 System Prompt。
@@ -62,29 +92,10 @@ public class AssistantPromptBuilder {
     }
 
     /**
-     * 构建用户 Prompt：按上下文分段渲染，空段整段省略。
-     *
-     * @param ctx 助手上下文（由 ServiceImpl 按 QueryPlan 组装）
-     * @return 用户提示词
-     */
-    public String buildUserPrompt(ProjectAssistantContext ctx) {
-        StringBuilder sb = new StringBuilder();
-        sb.append("项目：").append(ctx.getProjectName()).append('\n');
-        sb.append("用户问题：").append(ctx.getQuestion()).append('\n');
-        renderHistory(sb, ctx.getHistory());
-        renderComparison(sb, ctx.getComparison());
-        renderFacts(sb, ctx.getFacts());
-        renderFileList(sb, ctx.getFileNames());
-        renderDocuments(sb, ctx.getDocuments());
-        return sb.toString();
-    }
-
-    // ==================== 内部方法 ====================
-
-    /**
      * 渲染对话历史段（时间顺序，最近一轮在最后，追加约束 3）：
      * 仅用于指代消解语境（追加约束 1，事实依据规则见 System Prompt 第 10 条）；
-     * 空历史整段省略。
+     * 空历史整段省略。历史中旧引用标记不参与本轮 citations（约束 4：
+     * 本轮解析仅针对本轮 evidence，此处不做任何标记处理）。
      */
     private void renderHistory(StringBuilder sb, List<ConversationTurn> history) {
         if (history == null || history.isEmpty()) {
@@ -97,13 +108,16 @@ public class AssistantPromptBuilder {
         }
     }
 
+    // ==================== 内部方法 ====================
+
     /**
      * 渲染跨项目比较数据段（Phase 10，仅 COMPARISON 意图非 null）：字段维度 +
      * 参与单元（排名/差值由后端算好，LLM 只引用，追加约束 6/11）+ 聚合行 +
      * 排除单元（固定话术明确"未参与本次数值计算"，追加约束 5）；
      * comparison=null 整段省略。
      */
-    private void renderComparison(StringBuilder sb, CrossProjectComparisonVO comparison) {
+    private void renderComparison(StringBuilder sb, CrossProjectComparisonVO comparison,
+                                  RenderState state) {
         if (comparison == null) {
             return;
         }
@@ -112,20 +126,25 @@ public class AssistantPromptBuilder {
                 .append(" fieldCode=").append(comparison.getFieldCode())
                 .append(" 类型=").append(comparison.getFieldType()).append("]\n");
         for (CrossProjectComparisonVO.Unit unit : comparison.getUnits()) {
-            renderComparisonUnit(sb, comparison, unit);
+            renderComparisonUnit(sb, comparison, unit, state);
         }
+        // 聚合行为后端派生结果，无独立来源证据，不分配 citationId（约束 5）
         renderComparisonAggregates(sb, comparison);
         for (CrossProjectComparisonVO.ExcludedUnit excluded : comparison.getExcluded()) {
-            renderExcludedUnit(sb, excluded);
+            renderExcludedUnit(sb, comparison, excluded, state);
         }
     }
 
     /**
      * 渲染单个参与单元：排名 + 项目/实例 + 值（rawValue+normalized+单位）+
-     * 与当前项目差值（后端已算，追加约束 6）；rank=null（非数值字段）时如实省略名次。
+     * 与当前项目差值（后端已算，追加约束 6）+ 行末 [S{n}] 标记；
+     * rank=null（非数值字段）时如实省略名次。
      */
     private void renderComparisonUnit(StringBuilder sb, CrossProjectComparisonVO comparison,
-                                      CrossProjectComparisonVO.Unit unit) {
+                                      CrossProjectComparisonVO.Unit unit, RenderState state) {
+        // 渲染与登记一体：单元先登记取得 [S{n}]，行末追加标记（System Prompt 第 12 条）
+        AssistantReferenceVO ref = toComparisonReference(comparison, unit);
+        state.registerStructured(ref);
         sb.append("- ");
         if (unit.getRank() != null) {
             sb.append("排名#").append(unit.getRank()).append(' ');
@@ -152,7 +171,34 @@ public class AssistantPromptBuilder {
                 sb.append(" 第").append(unit.getSourcePage()).append("页");
             }
         }
-        sb.append('\n');
+        sb.append(" [").append(ref.getCitationId()).append("]\n");
+    }
+
+    /**
+     * 渲染排除单元（追加约束 5：可解释、禁止静默丢弃）：
+     * 固定话术"未参与本次数值计算" + 全部来源值明细；排除值继续登记为 S 类证据
+     * （约束 6），LLM 可引用其解释"为什么某项目未进入排名"，但 System Prompt
+     * 第 11 条禁止将其数值用于重新计算
+     */
+    private void renderExcludedUnit(StringBuilder sb, CrossProjectComparisonVO comparison,
+                                    CrossProjectComparisonVO.ExcludedUnit excluded,
+                                    RenderState state) {
+        String reasonLabel = switch (excluded.getReason()) {
+            case "CONFLICT" -> "该字段存在冲突";
+            case "UNPARSEABLE" -> "该字段值无法解析";
+            case "UNIT_INCOMPATIBLE" -> "该字段单位与基准单位不一致";
+            default -> "该字段无数据";
+        };
+        sb.append("- ⚠ 项目[").append(excluded.getProjectName()).append(" projectId=")
+                .append(excluded.getProjectId()).append("] 表单实例=")
+                .append(excluded.getProjectFormId()).append('（').append(reasonLabel)
+                .append("），因此未参与本次数值计算\n");
+        for (ProjectStructuredFactsVO.ValueItem item : excluded.getValues()) {
+            // 渲染与登记一体：每条排除值独立登记（不静默丢弃），行末 [S{n}]
+            AssistantReferenceVO ref = toExcludedValueReference(comparison, item);
+            state.registerStructured(ref);
+            sb.append("  - ").append(renderValueItem(item, ref.getCitationId())).append('\n');
+        }
     }
 
     /**
@@ -171,30 +217,10 @@ public class AssistantPromptBuilder {
     }
 
     /**
-     * 渲染排除单元（追加约束 5：可解释、禁止静默丢弃）：
-     * 固定话术"未参与本次数值计算" + 全部来源值明细
-     */
-    private void renderExcludedUnit(StringBuilder sb, CrossProjectComparisonVO.ExcludedUnit excluded) {
-        String reasonLabel = switch (excluded.getReason()) {
-            case "CONFLICT" -> "该字段存在冲突";
-            case "UNPARSEABLE" -> "该字段值无法解析";
-            case "UNIT_INCOMPATIBLE" -> "该字段单位与基准单位不一致";
-            default -> "该字段无数据";
-        };
-        sb.append("- ⚠ 项目[").append(excluded.getProjectName()).append(" projectId=")
-                .append(excluded.getProjectId()).append("] 表单实例=")
-                .append(excluded.getProjectFormId()).append('（').append(reasonLabel)
-                .append("），因此未参与本次数值计算\n");
-        for (ProjectStructuredFactsVO.ValueItem item : excluded.getValues()) {
-            sb.append("  - ").append(renderValueItem(item)).append('\n');
-        }
-    }
-
-    /**
      * 渲染结构化字段事实段：逐表单实例 → 逐字段；conflict=true 显式前置冲突标记
      * （硬约束 ⑧：Prompt 层面禁止模型裁决，必须列出来源说明）。
      */
-    private void renderFacts(StringBuilder sb, ProjectStructuredFactsVO facts) {
+    private void renderFacts(StringBuilder sb, ProjectStructuredFactsVO facts, RenderState state) {
         if (facts == null || facts.getForms().isEmpty()) {
             return;
         }
@@ -203,16 +229,17 @@ public class AssistantPromptBuilder {
             sb.append("表单实例 ").append(form.getProjectFormId())
                     .append("（formId=").append(form.getFormId()).append("）：\n");
             for (ProjectStructuredFactsVO.Field field : form.getFields()) {
-                renderField(sb, field);
+                renderField(sb, field, state);
             }
         }
     }
 
     /**
      * 渲染单个字段事实：定义快照行 + 冲突标记 + 逐来源值明细
-     * （rawValue 展示值与 normalizedValue计算值并列，追加约束 9）。
+     * （rawValue 展示值与 normalizedValue计算值并列，追加约束 9）+ 行末 [S{n}]。
      */
-    private void renderField(StringBuilder sb, ProjectStructuredFactsVO.Field field) {
+    private void renderField(StringBuilder sb, ProjectStructuredFactsVO.Field field,
+                             RenderState state) {
         sb.append("- 字段[").append(field.getFieldName())
                 .append(" fieldCode=").append(field.getFieldCode())
                 .append(" 类型=").append(field.getFieldType())
@@ -221,15 +248,19 @@ public class AssistantPromptBuilder {
             sb.append("  ⚠ 该字段存在多个不同值（冲突），禁止选择唯一值，必须列出来源说明\n");
         }
         for (ProjectStructuredFactsVO.ValueItem item : field.getValues()) {
-            sb.append("  - ").append(renderValueItem(item)).append('\n');
+            // 渲染与登记一体：每条来源值独立成项（冲突多值全保留，硬约束 ⑧），行末 [S{n}]
+            AssistantReferenceVO ref = toStructuredReference(field, item);
+            state.registerStructured(ref);
+            sb.append("  - ").append(renderValueItem(item, ref.getCitationId())).append('\n');
         }
     }
 
     /**
-     * 渲染单条来源值：值（normalized: x，单位: y）来源: 文件名 第N页；
-     * 缺失的来源元数据（文件名/页码/单位）如实省略，不编造。
+     * 渲染单条来源值：值（normalized: x，单位: y）来源: 文件名 第N页 [S{n}]；
+     * 缺失的来源元数据（文件名/页码/单位）如实省略，不编造；行末追加引用标记
+     * （citationId 由调用方登记取得，渲染与登记一一对应）。
      */
-    private String renderValueItem(ProjectStructuredFactsVO.ValueItem item) {
+    private String renderValueItem(ProjectStructuredFactsVO.ValueItem item, String citationId) {
         StringBuilder sb = new StringBuilder("值: ").append(item.getRawValue());
         if (item.getNormalizedValue() != null) {
             sb.append("（normalized: ").append(item.getNormalizedValue());
@@ -246,11 +277,13 @@ public class AssistantPromptBuilder {
         if (item.getSourcePage() != null) {
             sb.append(" 第").append(item.getSourcePage()).append("页");
         }
+        sb.append(" [").append(citationId).append(']');
         return sb.toString();
     }
 
     /**
-     * 渲染项目文件清单段（仅文件名；清单为当前版本限制内的一页数据）。
+     * 渲染项目文件清单段（仅文件名；清单为当前版本限制内的一页数据；
+     * 清单不构成证据，不登记不标记）。
      */
     private void renderFileList(StringBuilder sb, List<String> fileNames) {
         if (fileNames == null || fileNames.isEmpty()) {
@@ -264,20 +297,131 @@ public class AssistantPromptBuilder {
 
     /**
      * 渲染文档检索结果段：[D{n}] 来源: 文件名 第N页 + 原文，
-     * 来源元数据缺失时如实省略对应部分。
+     * 来源元数据缺失时如实省略对应部分；每个切片登记一项 FILE 证据。
      */
-    private void renderDocuments(StringBuilder sb, List<Document> documents) {
+    private void renderDocuments(StringBuilder sb, List<Document> documents, RenderState state) {
         if (documents == null || documents.isEmpty()) {
             return;
         }
         sb.append("\n【文档检索结果】\n");
-        int index = 1;
         for (Document doc : documents) {
             ChunkMetadataReader.ChunkSource source = chunkMetadataReader.read(doc);
             String fileName = source.fileName() != null ? source.fileName() : "未知文件";
             String page = source.page() != null ? " 第" + source.page() + "页" : "";
-            sb.append(String.format(DOC_MARKER_FORMAT, index, fileName, page, doc.getText()));
-            index++;
+            // 渲染与登记一体：先登记 FILE 证据取得 [D{n}]，再按标记渲染行首编号
+            AssistantReferenceVO ref = toFileReference(source, doc.getId());
+            state.registerFile(ref);
+            sb.append(String.format(DOC_MARKER_FORMAT, ref.getCitationId(), fileName, page, doc.getText()));
+        }
+    }
+
+    /**
+     * 比较参与单元 → STRUCTURED 证据项（fieldCode/fieldName 取比较结果级快照）。
+     */
+    private AssistantReferenceVO toComparisonReference(CrossProjectComparisonVO comparison,
+                                                       CrossProjectComparisonVO.Unit unit) {
+        AssistantReferenceVO ref = new AssistantReferenceVO();
+        ref.setType(AssistantReferenceVO.TYPE_STRUCTURED);
+        ref.setFieldCode(comparison.getFieldCode());
+        ref.setFieldName(comparison.getFieldName());
+        ref.setRawValue(unit.getRawValue());
+        ref.setNormalizedValue(unit.getNormalizedValue());
+        ref.setUnit(unit.getUnit());
+        ref.setSourceFileId(unit.getSourceFileId());
+        ref.setSourceFileName(unit.getSourceFileName());
+        ref.setSourcePage(unit.getSourcePage());
+        ref.setSourceChunkId(unit.getSourceChunkId());
+        return ref;
+    }
+
+    /**
+     * 排除单元来源值 → STRUCTURED 证据项（fieldCode/fieldName 复用比较结果级快照，
+     * excluded 单元与比较结果恒为同一 fieldCode）。
+     */
+    private AssistantReferenceVO toExcludedValueReference(CrossProjectComparisonVO comparison,
+                                                          ProjectStructuredFactsVO.ValueItem item) {
+        AssistantReferenceVO ref = new AssistantReferenceVO();
+        ref.setType(AssistantReferenceVO.TYPE_STRUCTURED);
+        ref.setFieldCode(comparison.getFieldCode());
+        ref.setFieldName(comparison.getFieldName());
+        ref.setRawValue(item.getRawValue());
+        ref.setNormalizedValue(item.getNormalizedValue());
+        ref.setUnit(item.getUnit());
+        ref.setSourceFileId(item.getSourceFileId());
+        ref.setSourceFileName(item.getSourceFileName());
+        ref.setSourcePage(item.getSourcePage());
+        ref.setSourceChunkId(item.getSourceChunkId());
+        return ref;
+    }
+
+    /**
+     * 结构化值行 → STRUCTURED 证据项。
+     */
+    private AssistantReferenceVO toStructuredReference(ProjectStructuredFactsVO.Field field,
+                                                       ProjectStructuredFactsVO.ValueItem item) {
+        AssistantReferenceVO ref = new AssistantReferenceVO();
+        ref.setType(AssistantReferenceVO.TYPE_STRUCTURED);
+        ref.setFieldCode(field.getFieldCode());
+        ref.setFieldName(field.getFieldName());
+        ref.setRawValue(item.getRawValue());
+        ref.setNormalizedValue(item.getNormalizedValue());
+        ref.setUnit(item.getUnit());
+        ref.setSourceFileId(item.getSourceFileId());
+        ref.setSourceFileName(item.getSourceFileName());
+        ref.setSourcePage(item.getSourcePage());
+        ref.setSourceChunkId(item.getSourceChunkId());
+        return ref;
+    }
+
+    /**
+     * RAG 切片 → FILE 证据项（metadata 经 ChunkMetadataReader 安全解析，
+     * 非法/缺失值如实置 null 不猜测，硬约束 ⑦）。
+     */
+    private AssistantReferenceVO toFileReference(ChunkMetadataReader.ChunkSource source, String chunkId) {
+        AssistantReferenceVO ref = new AssistantReferenceVO();
+        ref.setType(AssistantReferenceVO.TYPE_FILE);
+        ref.setFileId(source.fileId());
+        ref.setFileName(source.fileName());
+        ref.setPage(source.page());
+        ref.setChunkId(chunkId);
+        return ref;
+    }
+
+    /**
+     * Prompt 构建结果（Phase 11）：用户提示词 + 本次注入的全部证据
+     * （evidence 顺序 = 渲染顺序，citationId 与 userPrompt 标记一一对应，
+     * 为不可变快照）；Service 据此组装 references/usedFiles/citations。
+     */
+    public record PromptBuildResult(String userPrompt, List<AssistantReferenceVO> evidence) {
+    }
+
+    /**
+     * 单次构建的渲染状态：证据登记表 + S/D 双计数器（约束 1：citationId 一次构建内
+     * 全局唯一——S 与 D 各自独立递增，同一证据只登记一次；重新 build() 时状态重建、
+     * 重新编号）。
+     */
+    private static final class RenderState {
+        /**
+         * 已登记证据（顺序 = 渲染顺序）
+         */
+        private final List<AssistantReferenceVO> evidence = new ArrayList<>();
+        private int sCounter;
+        private int dCounter;
+
+        /**
+         * 登记结构化证据并分配 [S{n}] 标记
+         */
+        private void registerStructured(AssistantReferenceVO ref) {
+            ref.setCitationId("S" + ++sCounter);
+            evidence.add(ref);
+        }
+
+        /**
+         * 登记文档证据并分配 [D{n}] 标记（D 编号独立从 D1 开始，约束 13）
+         */
+        private void registerFile(AssistantReferenceVO ref) {
+            ref.setCitationId("D" + ++dCounter);
+            evidence.add(ref);
         }
     }
 }

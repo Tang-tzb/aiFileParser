@@ -46,7 +46,12 @@ import static org.mockito.Mockito.*;
  * standaloneQuestion 同时用于 RAG query 与回答 Prompt、原始 message 忠实入历史（约束 2）；
  * UNSUPPORTED 记录实际返回固定文案、3001 失败零轮次记录（约束 5）；成功轮次后置
  * appendTurn（约束 4）。
- * QueryPlanner/PromptBuilder/ChunkMetadataReader 为纯函数/渲染组件使用真实实例。
+ * <p>
+ * Phase 11 追加覆盖：answer 行内引用标记 → citations 实际引用子集（首次出现顺序
+ * 去重、与 references 共享实例）；未知标记仅忽略不影响主回答（约束 2/3）；
+ * answer 保留标记不剥离（约束 12）。
+ * QueryPlanner/PromptBuilder/AnswerCitationParser/ChunkMetadataReader 为纯函数/
+ * 渲染组件使用真实实例。
  *
  * @author Tang_tzb
  */
@@ -84,7 +89,7 @@ class ProjectAssistantServiceImplTest {
                 projectService, projectQueryService, projectRetrievalService,
                 queryIntentAnalyzer, new QueryPlanner(),
                 new AssistantPromptBuilder(new ChunkMetadataReader()),
-                new ChunkMetadataReader(), conversationHistoryStore,
+                new AnswerCitationParser(), conversationHistoryStore,
                 comparisonService, chatModel);
         ReflectionTestUtils.setField(service, "assistantTopK", 5);
         ReflectionTestUtils.setField(service, "maxInjectedTurns", 6);
@@ -174,6 +179,7 @@ class ProjectAssistantServiceImplTest {
         assertThat(resp.getAnswer())
                 .contains("当前版本暂不支持项目之间的归因分析与原因解释");
         assertThat(resp.getReferences()).isEmpty();
+        assertThat(resp.getCitations()).isEmpty();
         assertThat(resp.getStructuredData()).isEmpty();
         assertThat(resp.getUsedProjects()).containsExactly(PROJECT_ID);
         assertThat(resp.getUsedFiles()).isEmpty();
@@ -264,6 +270,7 @@ class ProjectAssistantServiceImplTest {
         assertThat(captor.getValue().getPageSize()).isEqualTo(100);
         verifyNoInteractions(projectQueryService, projectRetrievalService);
         assertThat(resp.getReferences()).isEmpty();
+        assertThat(resp.getCitations()).isEmpty();
         assertThat(resp.getUsedFiles()).isEmpty();
     }
 
@@ -356,11 +363,57 @@ class ProjectAssistantServiceImplTest {
         assertThat(resp.getAnswer()).isEqualTo(fallback);
         assertThat(resp.getComparisonData()).isNull();
         assertThat(resp.getReferences()).isEmpty();
+        assertThat(resp.getCitations()).isEmpty();
         assertThat(resp.getStructuredData()).isEmpty();
         assertThat(resp.getUsedProjects()).containsExactly(PROJECT_ID);
         verifyNoInteractions(projectRetrievalService, projectQueryService, chatModel);
         verify(conversationHistoryStore).appendTurn(
                 eq(PROJECT_ID), anyString(), eq(MESSAGE), eq(fallback));
+    }
+
+    // ==================== Phase 11 引用溯源（citations） ====================
+
+    /**
+     * answer 含行内引用标记 → citations = 实际引用子集：按首次出现顺序去重、
+     * 与 references 共享同一 VO 实例；answer 保留标记不剥离（约束 12）
+     */
+    @Test
+    void chat_citationsParsedFromAnswerMarkers() {
+        stubCommon(AssistantIntent.STRUCTURED);
+        stubRag(List.of());
+        stubAnswer("总投资约100万元[S1]，另一记载为200万元[S2]。[S1]再次出现。");
+        when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+
+        // references = 全量证据（facts 两条来源值 S1/S2）
+        assertThat(resp.getReferences()).extracting(AssistantReferenceVO::getCitationId)
+                .containsExactly("S1", "S2");
+        // citations = 实际引用子集，首次出现顺序去重（重复 [S1] 只计一次）
+        assertThat(resp.getCitations()).hasSize(2);
+        assertThat(resp.getCitations().get(0)).isSameAs(resp.getReferences().get(0));
+        assertThat(resp.getCitations().get(1)).isSameAs(resp.getReferences().get(1));
+        // answer 保留标记（约束 12：后端不剥离，前端负责渲染）
+        assertThat(resp.getAnswer()).contains("[S1]").contains("[S2]");
+    }
+
+    /**
+     * LLM 编造的标记（[S99]/[D9]，本轮 evidence 不存在）→ 仅 warn 忽略：
+     * 不创建新证据项、不改变 references，主回答原样返回不受影响（约束 2/3）
+     */
+    @Test
+    void chat_unknownCitationMarkersIgnored_answerUnaffected() {
+        stubCommon(AssistantIntent.STRUCTURED);
+        stubRag(List.of());
+        stubAnswer("总投资约100万元[S1]；编造[S99]与历史[D9]。");
+        when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+
+        assertThat(resp.getReferences()).hasSize(2);
+        assertThat(resp.getCitations()).hasSize(1);
+        assertThat(resp.getCitations().get(0).getCitationId()).isEqualTo("S1");
+        assertThat(resp.getAnswer()).isEqualTo("总投资约100万元[S1]；编造[S99]与历史[D9]。");
     }
 
     // ==================== 回答 LLM 错误边界（追加约束 11） ====================

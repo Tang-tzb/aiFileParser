@@ -8,7 +8,7 @@ import java.io.Serial;
 import java.io.Serializable;
 
 /**
- * 项目助手回答证据项（需求 §三十六基础版，扁平单类）
+ * 项目助手回答证据项（需求 §三十六基础版，扁平单类；Phase 11 增加 citationId 溯源）
  * <p>
  * 按 {@code type} 区分两组，组内无关字段为 null（避免双层判别式结构的序列化负担）：
  * <ul>
@@ -16,7 +16,10 @@ import java.io.Serializable;
  *   <li>{@code FILE}：RAG 命中文档切片（fileId/fileName/page/chunkId）</li>
  * </ul>
  * 语义（追加约束 3）：本 VO 是"本次回答可使用的证据集合"成员，不代表 LLM
- * 实际引用；精确 citation 属 Phase 11。
+ * 实际引用。Phase 11 溯源：{@code citationId} 为该证据注入 Prompt 时使用的引用
+ * 标记（结构化/比较证据 [S{n}]，文档片段 [D{n}]，一次构建内全局唯一），与 Prompt
+ * 中的标记、references 顺序严格一一对应；LLM 回答中的标记由
+ * AnswerCitationParser 确定性解析映射回本 VO，形成 citations（实际引用子集）。
  *
  * @author Tang_tzb
  */
@@ -37,6 +40,13 @@ public class AssistantReferenceVO implements Serializable {
      * 证据类型（STRUCTURED / FILE）
      */
     private String type;
+
+    /**
+     * 引用标记（Phase 11）：该证据注入 Prompt 时使用的编号（如 S1/D1），
+     * 一次 Prompt 构建内全局唯一（S 与 D 独立递增）；同一证据只登记一次，
+     * citations 经该字段从 answer 中确定性映射
+     */
+    private String citationId;
 
     // ==================== STRUCTURED 组 ====================
 

@@ -1,5 +1,6 @@
 package com.aifp.aiagent.assistant;
 
+import com.aifp.aiagent.dto.AssistantReferenceVO;
 import com.aifp.aiagent.dto.CrossProjectComparisonVO;
 import com.aifp.aiagent.dto.ProjectStructuredFactsVO;
 import org.junit.jupiter.api.BeforeEach;
@@ -7,18 +8,25 @@ import org.junit.jupiter.api.Test;
 import org.springframework.ai.document.Document;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * {@link AssistantPromptBuilder} 测试（离线；Phase 8 T3 / Phase 9 历史段扩展）
+ * {@link AssistantPromptBuilder} 测试（离线；Phase 8 T3 / Phase 9 历史段扩展 /
+ * Phase 11 证据编号登记）
  * <p>
  * 覆盖：System Prompt 反伪造关键规则（追加约束 1 原文、冲突不裁决、无依据话术、
- * rawValue/normalizedValue 规则、纯自然语言、Phase 9 追加约束 1 历史非事实源）；
+ * rawValue/normalizedValue 规则、纯自然语言、Phase 9 追加约束 1 历史非事实源、
+ * Phase 11 第 12 条行内引用标记规则）；
  * User Prompt 分段渲染（对话历史、冲突字段显式标记 + 逐来源明细、[D{n}] 编号、
- * 空段整段省略、文件清单）。
+ * 空段整段省略、文件清单）；
+ * Phase 11 证据登记（约束 13 编号漂移覆盖：citationId 唯一、Prompt 标记与 evidence
+ * 一一对应、S 跨段连续编号、D 独立从 D1、evidence 顺序 = 渲染顺序、聚合行无标记）。
  *
  * @author Tang_tzb
  */
@@ -62,7 +70,13 @@ class AssistantPromptBuilderTest {
                 // Phase 10 第 11 条：比较数字结论只能引用后端已算结果，禁止自算
                 .contains("只能引用【跨项目比较数据】中后端已计算的排名与聚合结果")
                 .contains("禁止自行计算、换算或派生任何数字")
-                .contains("被标记为排除（冲突/值无法解析/单位不兼容/无数据）的实例必须如实说明其未参与本次数值计算");
+                .contains("被标记为排除（冲突/值无法解析/单位不兼容/无数据）的实例必须如实说明其未参与本次数值计算")
+                // Phase 11 第 12 条：行内引用标记规则（标记为普通文本 + 禁止编造编号）
+                .contains("必须在该句末尾紧跟对应证据的引用标记")
+                .contains("[S编号]").contains("[D编号]")
+                .contains("只允许使用本次提供的证据中实际存在的标记")
+                .contains("禁止编造编号或使用不存在的标记")
+                .contains("引用标记属于普通文本");
     }
 
     // ==================== User Prompt：对话历史段（Phase 9） ====================
@@ -83,7 +97,7 @@ class AssistantPromptBuilderTest {
                 .factsUsed(true)
                 .build();
 
-        String user = builder.buildUserPrompt(ctx);
+        String user = builder.build(ctx).userPrompt();
 
         int historyIndex = user.indexOf("【对话历史】");
         int factsIndex = user.indexOf("【项目结构化字段事实】");
@@ -107,7 +121,7 @@ class AssistantPromptBuilderTest {
                 .projectName("示范项目").question("问题")
                 .build();
 
-        String user = builder.buildUserPrompt(ctx);
+        String user = builder.build(ctx).userPrompt();
 
         assertThat(user).doesNotContain("【对话历史】");
     }
@@ -129,7 +143,7 @@ class AssistantPromptBuilderTest {
                 .factsUsed(true).ragUsed(true).filesUsed(true)
                 .build();
 
-        String user = builder.buildUserPrompt(ctx);
+        String user = builder.build(ctx).userPrompt();
 
         // 头部：仅项目名 + 问题
         assertThat(user).startsWith("项目：示范项目\n用户问题：这个项目总投资是多少？");
@@ -164,7 +178,7 @@ class AssistantPromptBuilderTest {
                 .question("有哪些文档？")
                 .build();
 
-        String user = builder.buildUserPrompt(ctx);
+        String user = builder.build(ctx).userPrompt();
 
         assertThat(user)
                 .doesNotContain("【项目结构化字段事实】")
@@ -185,7 +199,7 @@ class AssistantPromptBuilderTest {
                 .facts(facts).factsUsed(true)
                 .build();
 
-        String user = builder.buildUserPrompt(ctx);
+        String user = builder.build(ctx).userPrompt();
 
         assertThat(user).doesNotContain("【项目结构化字段事实】");
     }
@@ -202,7 +216,7 @@ class AssistantPromptBuilderTest {
                 .ragUsed(true)
                 .build();
 
-        String user = builder.buildUserPrompt(ctx);
+        String user = builder.build(ctx).userPrompt();
 
         assertThat(user)
                 .contains("[D1] 来源: 未知文件")
@@ -223,7 +237,7 @@ class AssistantPromptBuilderTest {
                 .ragUsed(true)
                 .build();
 
-        String user = builder.buildUserPrompt(ctx);
+        String user = builder.build(ctx).userPrompt();
 
         assertThat(user).contains("[D1] 来源: 文件A.pdf 第1页").contains("[D2] 来源: 文件B.pdf 第2页");
     }
@@ -246,7 +260,7 @@ class AssistantPromptBuilderTest {
                 .factsUsed(true)
                 .build();
 
-        String user = builder.buildUserPrompt(ctx);
+        String user = builder.build(ctx).userPrompt();
 
         assertThat(user)
                 .contains("【跨项目比较数据】（以下排名与聚合结果均由后端计算完成，只能直接引用，禁止重新计算）")
@@ -272,7 +286,7 @@ class AssistantPromptBuilderTest {
                 .projectName("示范项目").question("问题")
                 .build();
 
-        assertThat(builder.buildUserPrompt(ctx)).doesNotContain("【跨项目比较数据】");
+        assertThat(builder.build(ctx).userPrompt()).doesNotContain("【跨项目比较数据】");
     }
 
     /**
@@ -292,7 +306,7 @@ class AssistantPromptBuilderTest {
                 .comparison(comparison)
                 .build();
 
-        String user = builder.buildUserPrompt(ctx);
+        String user = builder.build(ctx).userPrompt();
 
         assertThat(user)
                 .contains("- 项目[项目B projectId=1785900002]")
@@ -301,7 +315,121 @@ class AssistantPromptBuilderTest {
                 .doesNotContain("与当前项目差值");
     }
 
+    // ==================== 证据编号登记与引用溯源（Phase 11） ====================
+
+    /**
+     * 标记位置：结构化值行末 [S{n}]、文档行首 [D{n}]（与 System Prompt 第 12 条一致）
+     */
+    @Test
+    void build_markerPositions_endOfStructuredLine_startOfDocumentLine() {
+        ProjectAssistantContext ctx = ProjectAssistantContext.builder()
+                .projectName("示范项目")
+                .question("这个项目总投资是多少？")
+                .facts(factsWithConflict())
+                .factsUsed(true)
+                .documents(List.of(doc("切片内容A", "1785800001", "预算说明书.pdf", "3")))
+                .ragUsed(true)
+                .build();
+
+        AssistantPromptBuilder.PromptBuildResult result = builder.build(ctx);
+
+        assertThat(result.userPrompt())
+                .contains("值: 100万（normalized: 1000000，单位: 万元） 来源: 预算说明书.pdf 第3页 [S1]")
+                .contains("值: 200万（normalized: 2000000，单位: 万元） 来源: 可研报告.pdf 第5页 [S2]")
+                .contains("[D1] 来源: 预算说明书.pdf 第3页");
+    }
+
+    /**
+     * 约束 13 编号漂移覆盖：comparison 单元 → excluded 值 → facts 值 S 连续编号、
+     * D 独立从 D1、citationId 全局唯一、Prompt 中全部标记与 evidence 一一对应、
+     * evidence 顺序 = 渲染顺序（类型语义：STRUCTURED 前置、FILE 在后）
+     */
+    @Test
+    void build_citationIds_uniqueContinuousAndMatchPromptMarkers() {
+        ProjectAssistantContext ctx = ProjectAssistantContext.builder()
+                .projectName("示范项目")
+                .question("当前项目和项目B总投资比较")
+                .comparison(comparison())
+                .facts(factsWithConflict())
+                .factsUsed(true)
+                .documents(List.of(
+                        doc("切片一", "1785800001", "文件A.pdf", "1"),
+                        doc("切片二", "1785800002", "文件B.pdf", "2")))
+                .ragUsed(true)
+                .build();
+
+        AssistantPromptBuilder.PromptBuildResult result = builder.build(ctx);
+
+        // S 连续编号：比较单元 S1 → 排除值 S2 → facts 值 S3/S4；D 独立从 D1
+        assertThat(result.evidence())
+                .extracting(AssistantReferenceVO::getCitationId)
+                .containsExactly("S1", "S2", "S3", "S4", "D1", "D2");
+        assertThat(result.evidence())
+                .extracting(AssistantReferenceVO::getCitationId)
+                .doesNotHaveDuplicates();
+        assertThat(result.evidence())
+                .extracting(AssistantReferenceVO::getType)
+                .containsExactly(
+                        AssistantReferenceVO.TYPE_STRUCTURED, AssistantReferenceVO.TYPE_STRUCTURED,
+                        AssistantReferenceVO.TYPE_STRUCTURED, AssistantReferenceVO.TYPE_STRUCTURED,
+                        AssistantReferenceVO.TYPE_FILE, AssistantReferenceVO.TYPE_FILE);
+        // Prompt 中出现的全部标记与 evidence 一一对应（编号漂移防线）
+        List<String> promptMarkers = extractMarkers(result.userPrompt());
+        List<String> evidenceIds = result.evidence().stream()
+                .map(AssistantReferenceVO::getCitationId).toList();
+        assertThat(promptMarkers).containsExactlyInAnyOrderElementsOf(evidenceIds);
+    }
+
+    /**
+     * 聚合行不分配 citationId（约束 5：派生结果无独立来源证据）
+     */
+    @Test
+    void build_aggregateLineHasNoCitationMarker() {
+        ProjectAssistantContext ctx = ProjectAssistantContext.builder()
+                .projectName("示范项目")
+                .question("比较")
+                .comparison(comparison())
+                .build();
+
+        AssistantPromptBuilder.PromptBuildResult result = builder.build(ctx);
+
+        assertThat(result.evidence())
+                .extracting(AssistantReferenceVO::getCitationId)
+                .containsExactly("S1", "S2");
+        // 聚合行以"数量=2"收尾且无行末标记
+        assertThat(result.userPrompt())
+                .contains("- 聚合（后端计算）：最大=2000000，最小=1000000，总和=3000000，"
+                        + "平均=1500000.0000，数量=2\n");
+    }
+
+    /**
+     * 全空 Context：零证据登记（evidence 空列表）、Prompt 无任何标记
+     */
+    @Test
+    void build_emptyContext_registersNoEvidence() {
+        ProjectAssistantContext ctx = ProjectAssistantContext.builder()
+                .projectName("示范项目").question("有哪些文档？")
+                .build();
+
+        AssistantPromptBuilder.PromptBuildResult result = builder.build(ctx);
+
+        assertThat(result.evidence()).isEmpty();
+        assertThat(result.userPrompt()).doesNotContain("[S").doesNotContain("[D");
+    }
+
     // ==================== 测试辅助 ====================
+
+    /**
+     * 提取 Prompt 中全部 [S{n}]/[D{n}] 标记（编号漂移断言用）
+     */
+    private List<String> extractMarkers(String text) {
+        List<String> markers = new ArrayList<>();
+        Matcher matcher = Pattern.compile("\\[([SD]\\d+)]").matcher(text);
+        while (matcher.find()) {
+            markers.add(matcher.group(1));
+        }
+        return markers;
+    }
 
     /**
      * 单实例单字段（冲突）双来源事实

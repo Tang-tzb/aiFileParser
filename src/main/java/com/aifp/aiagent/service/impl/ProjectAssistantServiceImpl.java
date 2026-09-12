@@ -29,8 +29,10 @@ import java.util.*;
  * QueryIntentAnalyzer（第一次 LLM：意图 + 指代消解改写，仅注入历史用户问题）→
  * UNSUPPORTED 短路（追加约束 5，Phase 10 文案收窄为归因分析）→ QueryPlanner 按
  * AssistantQueryPlan 拉取结构化事实/项目 RAG（query=standaloneQuestion）/文件清单 →
- * AssistantPromptBuilder（反伪造 System Prompt + 对话历史段）→ ChatModel 最终回答 →
- * 组装 Response → appendTurn（后置：写失败不影响已生成的回答）。
+ * AssistantPromptBuilder.build（反伪造 System Prompt + 对话历史段 + Phase 11 证据
+ * 编号登记，返回 PromptBuildResult）→ ChatModel 最终回答 → AnswerCitationParser
+ * 确定性解析行内引用标记（只降级不报错）→ 组装 Response → appendTurn（后置：
+ * 写失败不影响已生成的回答）。
  * <p>
  * Phase 10 COMPARISON 分支：比较编排（槽位 LLM + 名称→ID + 确定性计算）先行，
  * 降级零后续 LLM 零检索；成功后 RAG 仅解释依据，比较证据并入 references/usedFiles/
@@ -38,8 +40,10 @@ import java.util.*;
  * <p>
  * 硬边界：不解析业务数字（追加约束 10）；不直查 Mapper（Phase 7 约束 3）；
  * 历史不是事实来源——项目事实每轮必须重新从本次 ProjectQueryService/
- * ProjectRetrievalService 拉取（Phase 9 追加约束 1）；引用为"可使用的证据集合"
- * 而非 LLM 实际引用（追加约束 3，Phase 11 精修 citation）。
+ * ProjectRetrievalService 拉取（Phase 9 追加约束 1）。Phase 11 引用语义：
+ * references = 本次注入 LLM 的全量证据集合（追加约束 3），citations = answer 中
+ * 引用标记经确定性解析映射的实际引用子集（只能来自 evidence，未知标记 warn 忽略；
+ * 解析异常降级为部分 citations，不影响已成功的 answer）。
  *
  * @author Tang_tzb
  */
@@ -61,7 +65,7 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     private final QueryIntentAnalyzer queryIntentAnalyzer;
     private final QueryPlanner queryPlanner;
     private final AssistantPromptBuilder promptBuilder;
-    private final ChunkMetadataReader chunkMetadataReader;
+    private final AnswerCitationParser citationParser;
     private final ConversationHistoryStore conversationHistoryStore;
     private final ProjectComparisonService comparisonService;
     private final ChatModel chatModel;
@@ -139,8 +143,11 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
                 .ragUsed(plan.isFetchRag())
                 .filesUsed(plan.isFetchFiles())
                 .build();
-        String answerText = generateAnswer(ctx);
-        AssistantChatResponse response = assembleResponse(projectId, conversationId, answerText, ctx);
+        // Phase 11：Prompt 渲染与证据登记一体完成（userPrompt 标记与 evidence 一一对应）
+        AssistantPromptBuilder.PromptBuildResult built = promptBuilder.build(ctx);
+        String answerText = generateAnswer(built.userPrompt());
+        AssistantChatResponse response = assembleResponse(projectId, conversationId,
+                answerText, ctx, built.evidence());
         // 追加约束 4：appendTurn 后置——Response 已构造完成，Redis 写失败仅 warn 不影响返回
         conversationHistoryStore.appendTurn(projectId, conversationId, message, answerText);
         log.info("项目助手问答完成 projectId={}, intent={}, history={}, facts={}, rag={}, files={}, references={}",
@@ -180,10 +187,13 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
                 .documents(documents)
                 .ragUsed(true)
                 .build();
-        String answerText = generateAnswer(ctx);
-        AssistantChatResponse response = assembleResponse(projectId, conversationId, answerText, ctx);
+        // Phase 11：Prompt 渲染与证据登记一体完成（比较证据前置 + D 编号独立）
+        AssistantPromptBuilder.PromptBuildResult built = promptBuilder.build(ctx);
+        String answerText = generateAnswer(built.userPrompt());
+        AssistantChatResponse response = assembleResponse(projectId, conversationId,
+                answerText, ctx, built.evidence());
         response.setComparisonData(outcome.comparison());
-        collectComparisonEvidence(outcome.comparison(), response);
+        applyComparisonProjects(response, outcome.comparison());
         conversationHistoryStore.appendTurn(projectId, conversationId, message, answerText);
         log.info("跨项目比较完成 projectId={}, targets={}, units={}, excluded={}, references={}",
                 projectId, outcome.comparison().getTargetProjectIds().size(),
@@ -193,38 +203,12 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     }
 
     /**
-     * 比较证据并入响应：参与/排除单元的全部来源作为结构化证据项（references 语义 =
-     * "本次注入 LLM 的证据集合"，追加约束 3；excluded 明细同样进入 Prompt，不得静默
-     * 丢弃，追加约束 5），来源文件并入 usedFiles；usedProjects = 当前项目 ∪ 目标项目。
-     * <p>
-     * 证据顺序：比较证据（STRUCTURED）前置、RAG 命中（FILE）在后——比较是回答主依据，
-     * RAG 仅解释依据（追加约束 11）；usedFiles 同样以比较来源优先去重。
+     * 比较分支 usedProjects = 当前项目 ∪ 目标项目（TreeSet 排序，Phase 10 语义不变；
+     * Phase 11 起 references/usedFiles/citations 统一由 assembleResponse 从
+     * evidence 组装，此处仅补齐 usedProjects）。
      */
-    private void collectComparisonEvidence(CrossProjectComparisonVO comparison,
-                                           AssistantChatResponse response) {
-        List<AssistantReferenceVO> comparisonRefs = new ArrayList<>();
-        Set<Long> comparisonFileIds = new LinkedHashSet<>();
-        for (CrossProjectComparisonVO.Unit unit : comparison.getUnits()) {
-            comparisonRefs.add(toComparisonReference(comparison, unit));
-            if (unit.getSourceFileId() != null) {
-                comparisonFileIds.add(unit.getSourceFileId());
-            }
-        }
-        for (CrossProjectComparisonVO.ExcludedUnit excluded : comparison.getExcluded()) {
-            for (ProjectStructuredFactsVO.ValueItem item : excluded.getValues()) {
-                comparisonRefs.add(toExcludedValueReference(comparison, item));
-                if (item.getSourceFileId() != null) {
-                    comparisonFileIds.add(item.getSourceFileId());
-                }
-            }
-        }
-        List<AssistantReferenceVO> references = response.getReferences();
-        references.addAll(0, comparisonRefs);
-        response.setReferences(references);
-        // usedFiles：比较来源在前，RAG 命中在后去重（LinkedHashSet 保序）
-        Set<Long> usedFileIds = new LinkedHashSet<>(comparisonFileIds);
-        usedFileIds.addAll(response.getUsedFiles());
-        response.setUsedFiles(new ArrayList<>(usedFileIds));
+    private void applyComparisonProjects(AssistantChatResponse response,
+                                         CrossProjectComparisonVO comparison) {
         Set<Long> projectIds = new TreeSet<>();
         projectIds.add(comparison.getCurrentProjectId());
         projectIds.addAll(comparison.getTargetProjectIds());
@@ -232,53 +216,15 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     }
 
     /**
-     * 比较参与单元 → STRUCTURED 证据项（fieldCode/fieldName 取比较结果级快照）。
-     */
-    private AssistantReferenceVO toComparisonReference(CrossProjectComparisonVO comparison,
-                                                       CrossProjectComparisonVO.Unit unit) {
-        AssistantReferenceVO ref = new AssistantReferenceVO();
-        ref.setType(AssistantReferenceVO.TYPE_STRUCTURED);
-        ref.setFieldCode(comparison.getFieldCode());
-        ref.setFieldName(comparison.getFieldName());
-        ref.setRawValue(unit.getRawValue());
-        ref.setNormalizedValue(unit.getNormalizedValue());
-        ref.setUnit(unit.getUnit());
-        ref.setSourceFileId(unit.getSourceFileId());
-        ref.setSourceFileName(unit.getSourceFileName());
-        ref.setSourcePage(unit.getSourcePage());
-        ref.setSourceChunkId(unit.getSourceChunkId());
-        return ref;
-    }
-
-    /**
-     * 排除单元来源值 → STRUCTURED 证据项（fieldCode/fieldName 复用比较结果级快照，
-     * excluded 单元与比较结果恒为同一 fieldCode）。
-     */
-    private AssistantReferenceVO toExcludedValueReference(CrossProjectComparisonVO comparison,
-                                                          ProjectStructuredFactsVO.ValueItem item) {
-        AssistantReferenceVO ref = new AssistantReferenceVO();
-        ref.setType(AssistantReferenceVO.TYPE_STRUCTURED);
-        ref.setFieldCode(comparison.getFieldCode());
-        ref.setFieldName(comparison.getFieldName());
-        ref.setRawValue(item.getRawValue());
-        ref.setNormalizedValue(item.getNormalizedValue());
-        ref.setUnit(item.getUnit());
-        ref.setSourceFileId(item.getSourceFileId());
-        ref.setSourceFileName(item.getSourceFileName());
-        ref.setSourcePage(item.getSourcePage());
-        ref.setSourceChunkId(item.getSourceChunkId());
-        return ref;
-    }
-
-    /**
      * 第二次 LLM 调用（最终回答）。错误边界（追加约束 11）：调用异常或空白回答
-     * 一律 3001 上抛，禁止降级 UNKNOWN 或重进 RAG 形成不可控循环。
+     * 一律 3001 上抛，禁止降级 UNKNOWN 或重进 RAG 形成不可控循环；
+     * Phase 11：引用解析不在本边界内——解析异常只降级 citations（约束 3）。
      */
-    private String generateAnswer(ProjectAssistantContext ctx) {
+    private String generateAnswer(String userPrompt) {
         try {
             Prompt prompt = new Prompt(List.of(
                     new SystemMessage(promptBuilder.buildSystemPrompt()),
-                    new UserMessage(promptBuilder.buildUserPrompt(ctx))));
+                    new UserMessage(userPrompt)));
             ChatResponse response = chatModel.call(prompt);
             String text = response.getResult().getOutput().getText();
             if (text == null || text.isBlank()) {
@@ -294,65 +240,44 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     }
 
     /**
-     * 组装响应：references = 本次注入的全部结构化来源 ∪ 全部 RAG 命中
-     * （"可使用的证据集合"，非 LLM 实际引用，追加约束 3）；usedFiles = 两来源
-     * fileId 去重；structuredData = 本次注入 LLM 的字段事实；全部后端组装（追加约束 12）。
+     * 组装响应（Phase 11）：
+     * references = PromptBuildResult.evidence（本次注入 LLM 的全量证据，顺序即
+     * Prompt 渲染顺序，追加约束 7 兼容既有前端语义）；
+     * usedFiles = 从 evidence 顺序派生（约束 8：与 LLM 是否实际引用无关）；
+     * citations = AnswerCitationParser 从 answer 确定性解析的实际引用子集
+     * （只能来自 evidence，未知标记 warn 忽略，解析异常降级不报错，约束 2/3）；
+     * structuredData = 本次注入 LLM 的字段事实；全部后端组装（追加约束 12）。
      */
     private AssistantChatResponse assembleResponse(Long projectId, String conversationId,
-                                                   String answerText, ProjectAssistantContext ctx) {
+                                                   String answerText, ProjectAssistantContext ctx,
+                                                   List<AssistantReferenceVO> evidence) {
         AssistantChatResponse response = new AssistantChatResponse();
         response.setConversationId(conversationId);
         response.setAnswer(answerText);
-        List<AssistantReferenceVO> references = new ArrayList<>();
-        Set<Long> usedFileIds = new LinkedHashSet<>();
-        collectStructuredReferences(ctx, references, usedFileIds);
-        collectFileReferences(ctx, references, usedFileIds);
-        response.setReferences(references);
-        response.setUsedFiles(new ArrayList<>(usedFileIds));
+        response.setReferences(new ArrayList<>(evidence));
+        response.setUsedFiles(deriveUsedFiles(evidence));
+        response.setCitations(citationParser.parse(answerText, evidence));
         response.setUsedProjects(List.of(projectId));
         response.setStructuredData(ctx.isFactsUsed() ? collectFields(ctx.getFacts()) : new ArrayList<>());
         return response;
     }
 
     /**
-     * 收集结构化来源证据：每个 Field 的每条 ValueItem 独立成项（冲突多值全保留，
-     * 硬约束 ⑧），并把来源文件并入 usedFiles。
+     * usedFiles 从 evidence 顺序派生（约束 8）：结构化来源文件（sourceFileId）∪
+     * RAG 命中文件（fileId），LinkedHashSet 按 evidence 顺序保序去重——比较分支
+     * "比较来源前置"语义随 evidence 顺序自动保持；文件清单场景不贡献证据，
+     * 与既有语义一致。
      */
-    private void collectStructuredReferences(ProjectAssistantContext ctx,
-                                             List<AssistantReferenceVO> references,
-                                             Set<Long> usedFileIds) {
-        if (!ctx.isFactsUsed() || ctx.getFacts() == null) {
-            return;
-        }
-        for (ProjectStructuredFactsVO.Form form : ctx.getFacts().getForms()) {
-            for (ProjectStructuredFactsVO.Field field : form.getFields()) {
-                for (ProjectStructuredFactsVO.ValueItem item : field.getValues()) {
-                    references.add(toStructuredReference(field, item));
-                    if (item.getSourceFileId() != null) {
-                        usedFileIds.add(item.getSourceFileId());
-                    }
-                }
+    private List<Long> deriveUsedFiles(List<AssistantReferenceVO> evidence) {
+        Set<Long> usedFileIds = new LinkedHashSet<>();
+        for (AssistantReferenceVO ref : evidence) {
+            Long fileId = AssistantReferenceVO.TYPE_STRUCTURED.equals(ref.getType())
+                    ? ref.getSourceFileId() : ref.getFileId();
+            if (fileId != null) {
+                usedFileIds.add(fileId);
             }
         }
-    }
-
-    /**
-     * 收集 RAG 命中文档证据：metadata 经 ChunkMetadataReader 安全解析，
-     * 非法/缺失值如实置 null 不猜测（硬约束 ⑦）。
-     */
-    private void collectFileReferences(ProjectAssistantContext ctx,
-                                       List<AssistantReferenceVO> references,
-                                       Set<Long> usedFileIds) {
-        if (!ctx.isRagUsed()) {
-            return;
-        }
-        for (Document doc : ctx.getDocuments()) {
-            ChunkMetadataReader.ChunkSource source = chunkMetadataReader.read(doc);
-            references.add(toFileReference(source, doc.getId()));
-            if (source.fileId() != null) {
-                usedFileIds.add(source.fileId());
-            }
-        }
+        return new ArrayList<>(usedFileIds);
     }
 
     /**
@@ -389,38 +314,6 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
         return conversationId == null || conversationId.isBlank()
                 ? UUID.randomUUID().toString()
                 : conversationId;
-    }
-
-    /**
-     * 结构化值行 → STRUCTURED 证据项。
-     */
-    private AssistantReferenceVO toStructuredReference(ProjectStructuredFactsVO.Field field,
-                                                       ProjectStructuredFactsVO.ValueItem item) {
-        AssistantReferenceVO ref = new AssistantReferenceVO();
-        ref.setType(AssistantReferenceVO.TYPE_STRUCTURED);
-        ref.setFieldCode(field.getFieldCode());
-        ref.setFieldName(field.getFieldName());
-        ref.setRawValue(item.getRawValue());
-        ref.setNormalizedValue(item.getNormalizedValue());
-        ref.setUnit(item.getUnit());
-        ref.setSourceFileId(item.getSourceFileId());
-        ref.setSourceFileName(item.getSourceFileName());
-        ref.setSourcePage(item.getSourcePage());
-        ref.setSourceChunkId(item.getSourceChunkId());
-        return ref;
-    }
-
-    /**
-     * RAG 切片 → FILE 证据项。
-     */
-    private AssistantReferenceVO toFileReference(ChunkMetadataReader.ChunkSource source, String chunkId) {
-        AssistantReferenceVO ref = new AssistantReferenceVO();
-        ref.setType(AssistantReferenceVO.TYPE_FILE);
-        ref.setFileId(source.fileId());
-        ref.setFileName(source.fileName());
-        ref.setPage(source.page());
-        ref.setChunkId(chunkId);
-        return ref;
     }
 
     /**
