@@ -1,0 +1,430 @@
+package com.aifp.aiagent.service.impl;
+
+import com.aifp.aiagent.assistant.*;
+import com.aifp.aiagent.common.ResultCode;
+import com.aifp.aiagent.dto.*;
+import com.aifp.aiagent.entity.enums.FieldType;
+import com.aifp.aiagent.exception.BusinessException;
+import com.aifp.aiagent.rag.ProjectRetrievalService;
+import com.aifp.aiagent.service.ProjectQueryService;
+import com.aifp.aiagent.service.ProjectService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.ai.chat.messages.AssistantMessage;
+import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.model.Generation;
+import org.springframework.ai.chat.prompt.Prompt;
+import org.springframework.ai.document.Document;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.*;
+
+/**
+ * {@link ProjectAssistantServiceImpl} 测试（离线，Phase 8 T4）
+ * <p>
+ * 覆盖：参数防御 400；守门 403/6001 透传；UNSUPPORTED 真短路（追加约束 5，
+ * verify 零 LLM/零检索/零事实查询/零文件清单）；五意图数据源路由（STRUCTURED 恒
+ * facts+RAG 追加约束 2）；conversationId 空生成/非空透传（追加约束 8 无状态）；
+ * 回答 LLM 异常/空白 → 3001 不重进 RAG（追加约束 11）；references/structuredData/
+ * usedFiles 组装（追加约束 3/12，后端组装非 LLM 生成）。
+ * QueryPlanner/PromptBuilder/ChunkMetadataReader 为纯函数/渲染组件使用真实实例。
+ *
+ * @author Tang_tzb
+ */
+@ExtendWith(MockitoExtension.class)
+class ProjectAssistantServiceImplTest {
+
+    private static final Long PROJECT_ID = 1785900001L;
+    private static final Long PROJECT_FORM_ID = 1785600001L;
+    private static final Long FILE_A = 1785800001L;
+    private static final Long FILE_B = 1785800002L;
+    private static final String MESSAGE = "这个项目总投资是多少？";
+
+    @Mock
+    private ProjectService projectService;
+    @Mock
+    private ProjectQueryService projectQueryService;
+    @Mock
+    private ProjectRetrievalService projectRetrievalService;
+    @Mock
+    private QueryIntentAnalyzer queryIntentAnalyzer;
+    @Mock
+    private ChatModel chatModel;
+
+    private ProjectAssistantServiceImpl service;
+
+    @BeforeEach
+    void setUp() {
+        service = new ProjectAssistantServiceImpl(
+                projectService, projectQueryService, projectRetrievalService,
+                queryIntentAnalyzer, new QueryPlanner(),
+                new AssistantPromptBuilder(new ChunkMetadataReader()),
+                new ChunkMetadataReader(), chatModel);
+        ReflectionTestUtils.setField(service, "assistantTopK", 5);
+    }
+
+    // ==================== 参数防御与守门 ====================
+
+    /**
+     * message 空白 → 400，快速失败不触碰任何依赖
+     */
+    @Test
+    void chat_blankMessage_throwsParamError400() {
+        assertThatThrownBy(() -> service.chat(PROJECT_ID, req("   ")))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.PARAM_ERROR.getCode()));
+        verifyNoInteractions(projectService, projectQueryService,
+                projectRetrievalService, queryIntentAnalyzer, chatModel);
+    }
+
+    /**
+     * 守门唯一入口 ProjectService（403）：意图识别前拦截
+     */
+    @Test
+    void chat_accessDenied_propagates403() {
+        when(projectService.getProjectById(PROJECT_ID)).thenThrow(new BusinessException(ResultCode.FORBIDDEN));
+
+        assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.FORBIDDEN.getCode()));
+        verifyNoInteractions(queryIntentAnalyzer, projectQueryService,
+                projectRetrievalService, chatModel);
+    }
+
+    /**
+     * 守门唯一入口 ProjectService（6001）
+     */
+    @Test
+    void chat_projectMissing_propagates6001() {
+        when(projectService.getProjectById(PROJECT_ID)).thenThrow(
+                new BusinessException(ResultCode.PROJECT_NOT_FOUND));
+
+        assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.PROJECT_NOT_FOUND.getCode()));
+    }
+
+    /**
+     * 意图识别 ChatModel 异常（3001）直接上抛，不进入任何检索
+     */
+    @Test
+    void chat_intentAnalyzerFailure_propagates3001() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(queryIntentAnalyzer.analyze(eq(MESSAGE), any())).thenThrow(
+                new BusinessException(ResultCode.AI_INVOKE_ERROR, "AI 意图识别调用失败"));
+
+        assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.AI_INVOKE_ERROR.getCode()));
+        verifyNoInteractions(projectQueryService, projectRetrievalService, chatModel);
+    }
+
+    // ==================== UNSUPPORTED 真短路（追加约束 5/14） ====================
+
+    /**
+     * UNSUPPORTED → 意图识别后立即返回确定性文案，零 LLM 零检索零事实查询零文件清单
+     */
+    @Test
+    void chat_unsupported_shortCircuitWithDeterministicAnswer() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(queryIntentAnalyzer.analyze(MESSAGE, "示范项目")).thenReturn(AssistantIntent.UNSUPPORTED);
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+
+        assertThat(resp.getAnswer())
+                .contains("当前版本暂不支持项目之间的比较、排序、统计、筛选和归因分析");
+        assertThat(resp.getReferences()).isEmpty();
+        assertThat(resp.getStructuredData()).isEmpty();
+        assertThat(resp.getUsedProjects()).containsExactly(PROJECT_ID);
+        assertThat(resp.getUsedFiles()).isEmpty();
+        verifyNoInteractions(projectQueryService, projectRetrievalService, chatModel);
+        verify(projectService, never()).listProjectFiles(any(), any());
+    }
+
+    // ==================== 意图路由（§十七 + 追加约束 2） ====================
+
+    /**
+     * STRUCTURED → 事实 + RAG 恒兜底（不判 forms 空），不拉文件清单；
+     * structuredData/references/usedFiles 全部后端组装
+     */
+    @Test
+    void chat_structured_factsAndRagAlwaysFetched() {
+        stubCommon(AssistantIntent.STRUCTURED);
+        stubRag(List.of());
+        stubAnswer("总投资约100万元。");
+        when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+
+        verify(projectRetrievalService).retrieve(PROJECT_ID, MESSAGE, 5);
+        verify(projectService, never()).listProjectFiles(any(), any());
+        assertThat(resp.getAnswer()).isEqualTo("总投资约100万元。");
+        // structuredData = 本次注入的全部字段事实
+        assertThat(resp.getStructuredData()).hasSize(1);
+        assertThat(resp.getStructuredData().get(0).getProjectFormId()).isEqualTo(PROJECT_FORM_ID);
+        // references = 全部结构化来源（2 条 ValueItem 独立成项，冲突语义保留）
+        assertThat(resp.getReferences()).hasSize(2);
+        AssistantReferenceVO first = resp.getReferences().get(0);
+        assertThat(first.getType()).isEqualTo(AssistantReferenceVO.TYPE_STRUCTURED);
+        assertThat(first.getFieldCode()).isEqualTo("total_investment");
+        assertThat(first.getRawValue()).isEqualTo("100万");
+        assertThat(first.getNormalizedValue()).isEqualTo("1000000");
+        assertThat(first.getSourceFileId()).isEqualTo(FILE_A);
+        // usedFiles = 结构化来源 ∪ RAG 命中去重
+        assertThat(resp.getUsedFiles()).containsExactly(FILE_A, FILE_B);
+    }
+
+    /**
+     * DOCUMENT → 仅 RAG：事实零查询、structuredData 为空，FILE 组证据来自 metadata
+     * （String 化 fileId/fileName/pageStart 由 ChunkMetadataReader 解析）
+     */
+    @Test
+    void chat_document_ragOnlyWithFileReferences() {
+        stubCommon(AssistantIntent.DOCUMENT);
+        stubRag(List.of(ragDoc()));
+        stubAnswer("总投资约100万元。");
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+
+        verifyNoInteractions(projectQueryService);
+        verify(projectService, never()).listProjectFiles(any(), any());
+        assertThat(resp.getStructuredData()).isEmpty();
+        assertThat(resp.getReferences()).hasSize(1);
+        AssistantReferenceVO ref = resp.getReferences().get(0);
+        assertThat(ref.getType()).isEqualTo(AssistantReferenceVO.TYPE_FILE);
+        assertThat(ref.getFileId()).isEqualTo(FILE_A);
+        assertThat(ref.getFileName()).isEqualTo("预算说明书.pdf");
+        assertThat(ref.getPage()).isEqualTo(3);
+        assertThat(resp.getUsedFiles()).containsExactly(FILE_A);
+    }
+
+    /**
+     * FILE_LIST → 仅文件清单；清单文件不贡献 references/usedFiles
+     * （引用证据仅两类：结构化来源 ∪ RAG 命中）
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void chat_fileList_fileNamesOnly() {
+        stubCommon(AssistantIntent.FILE_LIST);
+        stubAnswer("总投资约100万元。");
+        when(projectService.listProjectFiles(eq(PROJECT_ID), any(PageQuery.class)))
+                .thenReturn(filesPage());
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+
+        ArgumentCaptor<PageQuery> captor = ArgumentCaptor.forClass(PageQuery.class);
+        verify(projectService).listProjectFiles(eq(PROJECT_ID), captor.capture());
+        // 追加约束 7：PageQuery(1,100) 当前版本限制
+        assertThat(captor.getValue().getPageNum()).isEqualTo(1);
+        assertThat(captor.getValue().getPageSize()).isEqualTo(100);
+        verifyNoInteractions(projectQueryService, projectRetrievalService);
+        assertThat(resp.getReferences()).isEmpty();
+        assertThat(resp.getUsedFiles()).isEmpty();
+    }
+
+    /**
+     * UNKNOWN → 保守降级事实 + RAG 双通道（§十六）
+     */
+    @Test
+    void chat_unknown_factsAndRag() {
+        stubCommon(AssistantIntent.UNKNOWN);
+        stubRag(List.of());
+        stubAnswer("总投资约100万元。");
+        when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
+
+        service.chat(PROJECT_ID, req(MESSAGE));
+
+        verify(projectQueryService).queryProjectFacts(PROJECT_ID);
+        verify(projectRetrievalService).retrieve(PROJECT_ID, MESSAGE, 5);
+    }
+
+    /**
+     * HYBRID → 事实 + RAG
+     */
+    @Test
+    void chat_hybrid_factsAndRag() {
+        stubCommon(AssistantIntent.HYBRID);
+        stubRag(List.of());
+        stubAnswer("总投资约100万元。");
+        when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
+
+        service.chat(PROJECT_ID, req(MESSAGE));
+
+        verify(projectQueryService).queryProjectFacts(PROJECT_ID);
+        verify(projectRetrievalService).retrieve(PROJECT_ID, MESSAGE, 5);
+    }
+
+    // ==================== 回答 LLM 错误边界（追加约束 11） ====================
+
+    /**
+     * 回答 ChatModel 异常 → 3001，禁止降级 UNKNOWN 或重进 RAG
+     */
+    @Test
+    void chat_answerModelFailure_throwsAiInvokeError3001() {
+        stubCommon(AssistantIntent.STRUCTURED);
+        stubRag(List.of());
+        when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
+        // 回答桩覆盖验证：异常路径不依赖 stubAnswer
+        when(chatModel.call(any(Prompt.class))).thenThrow(new RuntimeException("timeout"));
+
+        assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.AI_INVOKE_ERROR.getCode()));
+        // 不重试：事实与检索各只查询一次
+        verify(projectQueryService, times(1)).queryProjectFacts(PROJECT_ID);
+        verify(projectRetrievalService, times(1)).retrieve(any(Long.class), any(), anyInt());
+    }
+
+    /**
+     * 回答空白 → 3001（"AI 未返回有效回答"），不重进 RAG
+     */
+    @Test
+    void chat_blankAnswer_throwsAiInvokeError3001() {
+        stubCommon(AssistantIntent.STRUCTURED);
+        stubRag(List.of());
+        when(projectQueryService.queryProjectFacts(PROJECT_ID)).thenReturn(facts());
+        when(chatModel.call(any(Prompt.class))).thenReturn(chatResponse("   "));
+
+        assertThatThrownBy(() -> service.chat(PROJECT_ID, req(MESSAGE)))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.AI_INVOKE_ERROR.getCode()));
+    }
+
+    // ==================== 会话无状态（追加约束 8） ====================
+
+    /**
+     * conversationId 空白 → 服务端生成 UUID（不读 ChatMemory，无状态）
+     */
+    @Test
+    void chat_blankConversationId_generatesUuid() {
+        stubCommon(AssistantIntent.FILE_LIST);
+        stubAnswer("总投资约100万元。");
+        when(projectService.listProjectFiles(eq(PROJECT_ID), any(PageQuery.class)))
+                .thenReturn(PageResult.empty());
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+
+        assertThat(resp.getConversationId()).isNotBlank();
+        assertThat(UUID.fromString(resp.getConversationId())).isNotNull();
+    }
+
+    /**
+     * conversationId 非空 → 原样透传
+     */
+    @Test
+    void chat_givenConversationId_passedThrough() {
+        stubCommon(AssistantIntent.FILE_LIST);
+        stubAnswer("总投资约100万元。");
+        when(projectService.listProjectFiles(eq(PROJECT_ID), any(PageQuery.class)))
+                .thenReturn(PageResult.empty());
+        AssistantChatRequest request = req(MESSAGE);
+        request.setConversationId("conv-001");
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, request);
+
+        assertThat(resp.getConversationId()).isEqualTo("conv-001");
+    }
+
+    // ==================== 测试辅助 ====================
+
+    /**
+     * 公共正向打桩：守门 + 意图识别（检索/事实/清单/LLM 回答按用例意图单独打桩，
+     * 避免出现未使用桩触发严格桩检查失败）
+     */
+    private void stubCommon(AssistantIntent intent) {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(queryIntentAnalyzer.analyze(MESSAGE, "示范项目")).thenReturn(intent);
+    }
+
+    /**
+     * 回答 LLM 正常输出打桩
+     */
+    private void stubAnswer(String text) {
+        when(chatModel.call(any(Prompt.class))).thenReturn(chatResponse(text));
+    }
+
+    /**
+     * RAG 检索打桩（DOCUMENT/STRUCTURED/HYBRID/UNKNOWN 用例使用）
+     */
+    private void stubRag(List<Document> hits) {
+        when(projectRetrievalService.retrieve(PROJECT_ID, MESSAGE, 5)).thenReturn(hits);
+    }
+
+    private AssistantChatRequest req(String message) {
+        AssistantChatRequest request = new AssistantChatRequest();
+        request.setMessage(message);
+        return request;
+    }
+
+    private ProjectVO projectVO() {
+        ProjectVO vo = new ProjectVO();
+        vo.setProjectId(PROJECT_ID);
+        vo.setProjectName("示范项目");
+        return vo;
+    }
+
+    /**
+     * 单实例单字段双来源事实（未标冲突——组装逻辑与冲突标记无关）
+     */
+    private ProjectStructuredFactsVO facts() {
+        ProjectStructuredFactsVO.Field field = new ProjectStructuredFactsVO.Field();
+        field.setProjectFormId(PROJECT_FORM_ID);
+        field.setFieldCode("total_investment");
+        field.setFieldName("总投资金额");
+        field.setFieldType(FieldType.DECIMAL.getCode());
+        field.getValues().add(value("100万", "1000000", FILE_A, "预算说明书.pdf"));
+        field.getValues().add(value("200万", "2000000", FILE_B, "可研报告.pdf"));
+        ProjectStructuredFactsVO.Form form = new ProjectStructuredFactsVO.Form();
+        form.setProjectFormId(PROJECT_FORM_ID);
+        form.getFields().add(field);
+        ProjectStructuredFactsVO facts = new ProjectStructuredFactsVO();
+        facts.getForms().add(form);
+        return facts;
+    }
+
+    private ProjectStructuredFactsVO.ValueItem value(String raw, String normalized,
+                                                     Long fileId, String fileName) {
+        ProjectStructuredFactsVO.ValueItem item = new ProjectStructuredFactsVO.ValueItem();
+        item.setRawValue(raw);
+        item.setNormalizedValue(normalized);
+        item.setUnit("万元");
+        item.setSourceFileId(fileId);
+        item.setSourceFileName(fileName);
+        item.setSourcePage(3);
+        return item;
+    }
+
+    /**
+     * RAG 命中切片（Phase 5 约定 metadata 值 String 化）
+     */
+    private Document ragDoc() {
+        return new Document("相关原文内容", Map.of(
+                "fileId", String.valueOf(FILE_A),
+                "fileName", "预算说明书.pdf",
+                "pageStart", "3"));
+    }
+
+    private PageResult<FileRecordVO> filesPage() {
+        FileRecordVO vo = new FileRecordVO();
+        vo.setFileId(FILE_A);
+        vo.setFileName("预算说明书.pdf");
+        return PageResult.of(1, 1, 1, 100, List.of(vo));
+    }
+
+    private ChatResponse chatResponse(String content) {
+        return new ChatResponse(List.of(new Generation(new AssistantMessage(content))));
+    }
+}

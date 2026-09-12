@@ -95,6 +95,13 @@ public class ProjectStructuredFactsVO implements Serializable {
         private static final long serialVersionUID = 1L;
 
         /**
+         * 项目表单实例 ID（事实边界 (projectFormId, fieldCode) 的另一半，
+         * Phase 8 Assistant/QueryPlanner 据此定位字段所属实例）
+         */
+        @JsonSerialize(using = ToStringSerializer.class)
+        private Long projectFormId;
+
+        /**
          * 字段定义 ID（快照归属，可空）
          */
         @JsonSerialize(using = ToStringSerializer.class)

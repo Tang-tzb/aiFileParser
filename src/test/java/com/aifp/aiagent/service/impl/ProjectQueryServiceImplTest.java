@@ -254,6 +254,24 @@ class ProjectQueryServiceImplTest {
     }
 
     /**
+     * Phase 8 增量：Field 透出 projectFormId——事实边界
+     * {@code projectFormId + fieldCode} 在 VO 层显式化（Phase 7 约束 8），
+     * 供 Assistant/前端区分字段所属表单实例
+     */
+    @Test
+    void fieldVO_projectFormIdExposed() {
+        activeFormStubs();
+        when(fieldValueMapper.selectList(any())).thenReturn(List.of(
+                value(PROJECT_FORM_ID, FIELD_AMOUNT, "100万", "1000000", FILE_A)));
+        when(fileRecordMapper.selectBatchIds(anyCollection())).thenReturn(List.of());
+
+        ProjectStructuredFactsVO result = queryService.queryProjectFacts(PROJECT_ID);
+
+        ProjectStructuredFactsVO.Field field = result.getForms().get(0).getFields().get(0);
+        assertThat(field.getProjectFormId()).isEqualTo(PROJECT_FORM_ID);
+    }
+
+    /**
      * 约束 9：来源文件缺失（含 sourceFileId 为 null 的行）不影响整条查询——
      * sourceFileName=null，rawValue/normalizedValue/sourceFileId/page/chunkId 完整保留
      */

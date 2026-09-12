@@ -122,6 +122,7 @@ public class ProjectQueryServiceImpl implements ProjectQueryService {
                                                       List<ProjectFormFieldValue> rows,
                                                       Map<Long, String> fileNameMap) {
         ProjectStructuredFactsVO.Field fieldVO = new ProjectStructuredFactsVO.Field();
+        fieldVO.setProjectFormId(firstRow.getProjectFormId());
         fieldVO.setFieldId(firstRow.getFieldId());
         fieldVO.setFieldCode(firstRow.getFieldCode());
         fieldVO.setFieldName(firstRow.getFieldName());
