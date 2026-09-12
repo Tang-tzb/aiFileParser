@@ -45,4 +45,20 @@ public interface ProjectRetrievalService {
      * @return 命中切片（原样返回）
      */
     List<Document> retrieve(List<Long> projectIds, String query, int topK);
+
+    /**
+     * 项目内指定文件范围检索（§二十 searchProjectFiles，Phase 7）。
+     * <p>
+     * 安全边界（约束 6）：{@code fileIds ∩ 项目当前关联文件} 取交集后构造 fileId IN 子句，
+     * 交集外 ID 一律不进入检索条件——不访问项目外文件；不缓存文件归属，
+     * 文件解除项目关联后立即失去本项目检索资格；交集为空直接返回空列表，
+     * <b>绝不调用向量库</b>。
+     *
+     * @param projectId 项目ID（不可空；先权限/存在性守门）
+     * @param query     查询文本（空白返回空列表，不调用向量库）
+     * @param fileIds   指定文件ID列表（null/empty/含 null 抛 IllegalArgumentException）
+     * @param topK      返回条数（原样透传向量库）
+     * @return 命中切片（原样返回，不改写 metadata，供 Phase 11 溯源）
+     */
+    List<Document> searchProjectFiles(Long projectId, String query, List<Long> fileIds, int topK);
 }

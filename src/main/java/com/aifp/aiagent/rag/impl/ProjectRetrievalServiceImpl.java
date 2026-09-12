@@ -80,6 +80,42 @@ public class ProjectRetrievalServiceImpl implements ProjectRetrievalService {
         return hits;
     }
 
+    @Override
+    public List<Document> searchProjectFiles(Long projectId, String query, List<Long> fileIds, int topK) {
+        Objects.requireNonNull(projectId, "projectId 不可为空");
+        // 参数防御在守门前：非法入参不泄露任何项目资源信息（镜像约束 6 语义）
+        if (fileIds == null || fileIds.isEmpty()) {
+            throw new IllegalArgumentException("fileIds 不可为空");
+        }
+        if (fileIds.stream().anyMatch(Objects::isNull)) {
+            throw new IllegalArgumentException("fileIds 不允许包含 null 元素");
+        }
+        if (isBlank(query)) {
+            return List.of();
+        }
+        ensureProjectGuard(projectId);
+
+        // 交集防越权（约束 6）：fileIds ∩ 项目当前关联文件（实时查询，不缓存）；
+        // 交集外 ID 不进入 Filter，解绑文件即刻失去检索资格
+        List<Long> projectFileIds = fileService.listFileIdsByProject(projectId);
+        List<Long> intersection = fileIds.stream()
+                .distinct()
+                .filter(projectFileIds::contains)
+                .sorted()
+                .toList();
+        // 交集为空绝不调用向量库（约束 6 硬边界）
+        if (intersection.isEmpty()) {
+            log.info("项目文件交集为空，跳过检索 projectId={}, requestedFileIds={}", projectId, fileIds.size());
+            return List.of();
+        }
+
+        String filter = "fileId in [" + quoted(intersection) + "]";
+        List<Document> hits = vectorStoreService.search(query, topK, filter);
+        log.info("项目文件范围检索完成 projectId={}, matchedFileIds={}, filterLength={}, hits={}",
+                projectId, intersection.size(), filter.length(), hits.size());
+        return hits;
+    }
+
     // ==================== 内部方法 ====================
 
     /**

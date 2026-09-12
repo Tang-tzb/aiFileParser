@@ -261,6 +261,138 @@ class ProjectRetrievalServiceImplTest {
         verifyNoInteractions(fileService, vectorStoreService);
     }
 
+    // ==================== searchProjectFiles（Phase 7，约束 6 交集防越权） ====================
+
+    /**
+     * 交集防越权核心场景：请求 fileIds 含项目外文件 → 仅交集进入 Filter，
+     * 项目外文件 ID 绝不出现（不访问项目外文件）；入参乱序 → 输出排序
+     */
+    @Test
+    void searchProjectFiles_outOfProjectFilesExcluded_exactFilterExpression() {
+        guardPasses(PROJECT_ID);
+        // 项目当前仅关联 FILE_ID_2/FILE_ID_3；FILE_ID_1 属其他项目或历史关联已解绑
+        when(fileService.listFileIdsByProject(PROJECT_ID)).thenReturn(List.of(FILE_ID_2, FILE_ID_3));
+        List<Document> hits = List.of(new Document("命中"));
+        stubSearch(hits);
+
+        List<Document> result = retrievalService.searchProjectFiles(
+                PROJECT_ID, QUERY, new ArrayList<>(List.of(FILE_ID_3, FILE_ID_1, FILE_ID_2)), TOP_K);
+
+        // 交集 = {FILE_ID_2, FILE_ID_3}：越权 ID_1 被剔除且排序稳定
+        assertThat(capturedFilter()).isEqualTo("fileId in ['1785800002','1785800003']");
+        assertThat(capturedFilter()).doesNotContain("'1785800001'");
+        assertThat(result).isSameAs(hits);
+    }
+
+    /**
+     * 交集为空：直接返回空列表，绝不调用 Milvus（约束 6 硬边界）；
+     * 文件解绑后（不在项目当前文件列表）即刻失去检索资格
+     */
+    @Test
+    void searchProjectFiles_emptyIntersection_neverCallsVectorStore() {
+        guardPasses(PROJECT_ID);
+        // FILE_ID_1 曾属于项目但已解绑：实时查询不再返回 → 无资格
+        when(fileService.listFileIdsByProject(PROJECT_ID)).thenReturn(List.of(FILE_ID_2));
+
+        List<Document> result = retrievalService.searchProjectFiles(
+                PROJECT_ID, QUERY, List.of(FILE_ID_1), TOP_K);
+
+        assertThat(result).isEmpty();
+        verifyNoInteractions(vectorStoreService);
+    }
+
+    /**
+     * 请求重复 ID：distinct 后进 Filter，只出现一次
+     */
+    @Test
+    void searchProjectFiles_duplicateFileIds_dedupedInFilter() {
+        guardPasses(PROJECT_ID);
+        when(fileService.listFileIdsByProject(PROJECT_ID)).thenReturn(List.of(FILE_ID_1, FILE_ID_2));
+
+        retrievalService.searchProjectFiles(
+                PROJECT_ID, QUERY, List.of(FILE_ID_2, FILE_ID_2, FILE_ID_1), TOP_K);
+
+        assertThat(capturedFilter()).isEqualTo("fileId in ['1785800001','1785800002']");
+    }
+
+    /**
+     * query 空白：返回空列表且不守门不查文件不调向量库
+     */
+    @Test
+    void searchProjectFiles_blankQuery_returnsEmptyWithoutAnyInteraction() {
+        assertThat(retrievalService.searchProjectFiles(PROJECT_ID, "  ", List.of(FILE_ID_1), TOP_K)).isEmpty();
+        assertThat(retrievalService.searchProjectFiles(PROJECT_ID, null, List.of(FILE_ID_1), TOP_K)).isEmpty();
+
+        verifyNoInteractions(vectorStoreService, fileService, projectAccessService, projectMapper);
+    }
+
+    /**
+     * 参数防御在守门前：projectId null / fileIds null、empty、含 null →
+     * 快速失败，不泄露项目资源信息
+     */
+    @Test
+    void searchProjectFiles_invalidArguments_rejectedBeforeAnyInteraction() {
+        assertThatThrownBy(() -> retrievalService.searchProjectFiles(null, QUERY, List.of(FILE_ID_1), TOP_K))
+                .isInstanceOf(NullPointerException.class);
+        assertThatThrownBy(() -> retrievalService.searchProjectFiles(PROJECT_ID, QUERY, null, TOP_K))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> retrievalService.searchProjectFiles(PROJECT_ID, QUERY, List.of(), TOP_K))
+                .isInstanceOf(IllegalArgumentException.class);
+        // ArrayList 手工装配以允许 null 元素（List.of 拒绝 null，无法测到服务端防御）
+        List<Long> withNull = new ArrayList<>();
+        withNull.add(FILE_ID_1);
+        withNull.add(null);
+        assertThatThrownBy(() -> retrievalService.searchProjectFiles(PROJECT_ID, QUERY, withNull, TOP_K))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        verifyNoInteractions(vectorStoreService, fileService, projectAccessService, projectMapper);
+    }
+
+    /**
+     * 守门先于文件查询：无权限 → FORBIDDEN(403)，不发起文件查询/向量检索
+     */
+    @Test
+    void searchProjectFiles_accessDenied_throwsBeforeFileQuery() {
+        when(projectAccessService.canAccess(PROJECT_ID)).thenReturn(false);
+
+        assertThatThrownBy(() ->
+                retrievalService.searchProjectFiles(PROJECT_ID, QUERY, List.of(FILE_ID_1), TOP_K))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.FORBIDDEN.getCode()));
+
+        verifyNoInteractions(fileService, vectorStoreService);
+    }
+
+    /**
+     * 守门先于文件查询：项目不存在 → PROJECT_NOT_FOUND(6001)
+     */
+    @Test
+    void searchProjectFiles_projectNotFound_throws6001() {
+        when(projectAccessService.canAccess(PROJECT_ID)).thenReturn(true);
+        when(projectMapper.selectById(PROJECT_ID)).thenReturn(null);
+
+        assertThatThrownBy(() ->
+                retrievalService.searchProjectFiles(PROJECT_ID, QUERY, List.of(FILE_ID_1), TOP_K))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.PROJECT_NOT_FOUND.getCode()));
+
+        verifyNoInteractions(fileService, vectorStoreService);
+    }
+
+    /**
+     * topK 原样透传（searchProjectFiles 与 retrieve 同语义）
+     */
+    @Test
+    void searchProjectFiles_passesThroughTopK() {
+        guardPasses(PROJECT_ID);
+        when(fileService.listFileIdsByProject(PROJECT_ID)).thenReturn(List.of(FILE_ID_1));
+        stubSearch(List.of(new Document("d1")));
+
+        retrievalService.searchProjectFiles(PROJECT_ID, QUERY, List.of(FILE_ID_1), 42);
+
+        verify(vectorStoreService).search(eq(QUERY), eq(42), anyString());
+    }
+
     // ==================== 测试辅助 ====================
 
     private void guardPasses(Long projectId) {
