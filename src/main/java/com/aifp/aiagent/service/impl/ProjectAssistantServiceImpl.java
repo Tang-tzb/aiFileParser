@@ -27,10 +27,14 @@ import java.util.*;
  * 执行序：参数防御 → ProjectService 守门（403/6001 唯一入口，权限前置——
  * 守门通过前零 Redis 访问）→ 会话历史读取（ConversationHistoryStore，降级安全）→
  * QueryIntentAnalyzer（第一次 LLM：意图 + 指代消解改写，仅注入历史用户问题）→
- * UNSUPPORTED 短路（零 LLM 零检索）→ QueryPlanner 按 AssistantQueryPlan 拉取
- * 结构化事实/项目 RAG（query=standaloneQuestion）/文件清单 → AssistantPromptBuilder
- * （反伪造 System Prompt + 对话历史段）→ ChatModel 最终回答 → 组装 Response →
- * appendTurn（后置：写失败不影响已生成的回答）。
+ * UNSUPPORTED 短路（追加约束 5，Phase 10 文案收窄为归因分析）→ QueryPlanner 按
+ * AssistantQueryPlan 拉取结构化事实/项目 RAG（query=standaloneQuestion）/文件清单 →
+ * AssistantPromptBuilder（反伪造 System Prompt + 对话历史段）→ ChatModel 最终回答 →
+ * 组装 Response → appendTurn（后置：写失败不影响已生成的回答）。
+ * <p>
+ * Phase 10 COMPARISON 分支：比较编排（槽位 LLM + 名称→ID + 确定性计算）先行，
+ * 降级零后续 LLM 零检索；成功后 RAG 仅解释依据，比较证据并入 references/usedFiles/
+ * usedProjects，comparisonData 单独返回。
  * <p>
  * 硬边界：不解析业务数字（追加约束 10）；不直查 Mapper（Phase 7 约束 3）；
  * 历史不是事实来源——项目事实每轮必须重新从本次 ProjectQueryService/
@@ -59,6 +63,7 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     private final AssistantPromptBuilder promptBuilder;
     private final ChunkMetadataReader chunkMetadataReader;
     private final ConversationHistoryStore conversationHistoryStore;
+    private final ProjectComparisonService comparisonService;
     private final ChatModel chatModel;
 
     /**
@@ -114,6 +119,10 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
         // 追加约束 2：standaloneQuestion 是本轮唯一有效问题，RAG query 与 Prompt 用户问题共用
         String effectiveQuestion = analysis.getStandaloneQuestion();
         AssistantQueryPlan plan = queryPlanner.buildPlan(analysis.getIntent());
+        if (analysis.getIntent() == AssistantIntent.COMPARISON) {
+            return answerComparison(projectId, conversationId, message, projectName,
+                    effectiveQuestion, history);
+        }
         ProjectStructuredFactsVO facts = plan.isFetchFacts()
                 ? projectQueryService.queryProjectFacts(projectId) : null;
         List<Document> documents = plan.isFetchRag()
@@ -138,6 +147,127 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
                 projectId, analysis.getIntent(), history.size(), facts != null, plan.isFetchRag(),
                 plan.isFetchFiles(), response.getReferences().size());
         return response;
+    }
+
+    /**
+     * COMPARISON 分支（Phase 10）：先执行跨项目比较编排（槽位 LLM + 名称→ID 映射 +
+     * 字段级事实 + 确定性计算，追加约束 9/14——每次比较都重新查询与计算，历史不参与）。
+     * 降级（字段未定/范围未定/无数据等，追加约束 2/12）→ 零后续 LLM 零检索直接返回
+     * 确定性文案；成功 → RAG 仅作解释依据（追加约束 11），最终回答 LLM 只能引用
+     * FieldComparisonCalculator 已算结果（追加约束 6）。
+     */
+    private AssistantChatResponse answerComparison(Long projectId, String conversationId, String message,
+                                                   String projectName, String effectiveQuestion,
+                                                   List<ConversationTurn> history) {
+        ProjectComparisonService.ComparisonOutcome outcome =
+                comparisonService.compare(projectId, effectiveQuestion);
+        if (outcome.deterministicAnswer() != null) {
+            AssistantChatResponse response = new AssistantChatResponse();
+            response.setConversationId(conversationId);
+            response.setAnswer(outcome.deterministicAnswer());
+            response.setUsedProjects(List.of(projectId));
+            conversationHistoryStore.appendTurn(projectId, conversationId, message, response.getAnswer());
+            log.info("跨项目比较确定性降级 projectId={}", projectId);
+            return response;
+        }
+        List<Document> documents = projectRetrievalService
+                .retrieve(projectId, effectiveQuestion, assistantTopK);
+        ProjectAssistantContext ctx = ProjectAssistantContext.builder()
+                .projectName(projectName)
+                .question(effectiveQuestion)
+                .history(history)
+                .comparison(outcome.comparison())
+                .documents(documents)
+                .ragUsed(true)
+                .build();
+        String answerText = generateAnswer(ctx);
+        AssistantChatResponse response = assembleResponse(projectId, conversationId, answerText, ctx);
+        response.setComparisonData(outcome.comparison());
+        collectComparisonEvidence(outcome.comparison(), response);
+        conversationHistoryStore.appendTurn(projectId, conversationId, message, answerText);
+        log.info("跨项目比较完成 projectId={}, targets={}, units={}, excluded={}, references={}",
+                projectId, outcome.comparison().getTargetProjectIds().size(),
+                outcome.comparison().getUnits().size(),
+                outcome.comparison().getExcluded().size(), response.getReferences().size());
+        return response;
+    }
+
+    /**
+     * 比较证据并入响应：参与/排除单元的全部来源作为结构化证据项（references 语义 =
+     * "本次注入 LLM 的证据集合"，追加约束 3；excluded 明细同样进入 Prompt，不得静默
+     * 丢弃，追加约束 5），来源文件并入 usedFiles；usedProjects = 当前项目 ∪ 目标项目。
+     * <p>
+     * 证据顺序：比较证据（STRUCTURED）前置、RAG 命中（FILE）在后——比较是回答主依据，
+     * RAG 仅解释依据（追加约束 11）；usedFiles 同样以比较来源优先去重。
+     */
+    private void collectComparisonEvidence(CrossProjectComparisonVO comparison,
+                                           AssistantChatResponse response) {
+        List<AssistantReferenceVO> comparisonRefs = new ArrayList<>();
+        Set<Long> comparisonFileIds = new LinkedHashSet<>();
+        for (CrossProjectComparisonVO.Unit unit : comparison.getUnits()) {
+            comparisonRefs.add(toComparisonReference(comparison, unit));
+            if (unit.getSourceFileId() != null) {
+                comparisonFileIds.add(unit.getSourceFileId());
+            }
+        }
+        for (CrossProjectComparisonVO.ExcludedUnit excluded : comparison.getExcluded()) {
+            for (ProjectStructuredFactsVO.ValueItem item : excluded.getValues()) {
+                comparisonRefs.add(toExcludedValueReference(comparison, item));
+                if (item.getSourceFileId() != null) {
+                    comparisonFileIds.add(item.getSourceFileId());
+                }
+            }
+        }
+        List<AssistantReferenceVO> references = response.getReferences();
+        references.addAll(0, comparisonRefs);
+        response.setReferences(references);
+        // usedFiles：比较来源在前，RAG 命中在后去重（LinkedHashSet 保序）
+        Set<Long> usedFileIds = new LinkedHashSet<>(comparisonFileIds);
+        usedFileIds.addAll(response.getUsedFiles());
+        response.setUsedFiles(new ArrayList<>(usedFileIds));
+        Set<Long> projectIds = new TreeSet<>();
+        projectIds.add(comparison.getCurrentProjectId());
+        projectIds.addAll(comparison.getTargetProjectIds());
+        response.setUsedProjects(new ArrayList<>(projectIds));
+    }
+
+    /**
+     * 比较参与单元 → STRUCTURED 证据项（fieldCode/fieldName 取比较结果级快照）。
+     */
+    private AssistantReferenceVO toComparisonReference(CrossProjectComparisonVO comparison,
+                                                       CrossProjectComparisonVO.Unit unit) {
+        AssistantReferenceVO ref = new AssistantReferenceVO();
+        ref.setType(AssistantReferenceVO.TYPE_STRUCTURED);
+        ref.setFieldCode(comparison.getFieldCode());
+        ref.setFieldName(comparison.getFieldName());
+        ref.setRawValue(unit.getRawValue());
+        ref.setNormalizedValue(unit.getNormalizedValue());
+        ref.setUnit(unit.getUnit());
+        ref.setSourceFileId(unit.getSourceFileId());
+        ref.setSourceFileName(unit.getSourceFileName());
+        ref.setSourcePage(unit.getSourcePage());
+        ref.setSourceChunkId(unit.getSourceChunkId());
+        return ref;
+    }
+
+    /**
+     * 排除单元来源值 → STRUCTURED 证据项（fieldCode/fieldName 复用比较结果级快照，
+     * excluded 单元与比较结果恒为同一 fieldCode）。
+     */
+    private AssistantReferenceVO toExcludedValueReference(CrossProjectComparisonVO comparison,
+                                                          ProjectStructuredFactsVO.ValueItem item) {
+        AssistantReferenceVO ref = new AssistantReferenceVO();
+        ref.setType(AssistantReferenceVO.TYPE_STRUCTURED);
+        ref.setFieldCode(comparison.getFieldCode());
+        ref.setFieldName(comparison.getFieldName());
+        ref.setRawValue(item.getRawValue());
+        ref.setNormalizedValue(item.getNormalizedValue());
+        ref.setUnit(item.getUnit());
+        ref.setSourceFileId(item.getSourceFileId());
+        ref.setSourceFileName(item.getSourceFileName());
+        ref.setSourcePage(item.getSourcePage());
+        ref.setSourceChunkId(item.getSourceChunkId());
+        return ref;
     }
 
     /**
@@ -237,14 +367,15 @@ public class ProjectAssistantServiceImpl implements ProjectAssistantService {
     }
 
     /**
-     * UNSUPPORTED 确定性响应（追加约束 14 文案明确）：零 LLM 零检索，仅用于
-     * 告知能力边界，不产生任何证据项；文案即实际返回内容，供 chat() 记入历史
+     * UNSUPPORTED 确定性响应（Phase 10 文案收窄，追加约束 13）：比较/排名/统计聚合
+     * 已由 COMPARISON 意图承接，本短路仅覆盖归因分析、原因解释类问题；零 LLM 零检索，
+     * 仅用于告知能力边界，不产生任何证据项；文案即实际返回内容，供 chat() 记入历史
      * （追加约束 5）。
      */
     private AssistantChatResponse buildUnsupportedResponse(Long projectId, String conversationId) {
         AssistantChatResponse response = new AssistantChatResponse();
         response.setConversationId(conversationId);
-        response.setAnswer("当前版本暂不支持项目之间的比较、排序、统计、筛选和归因分析，请调整问题后重试。");
+        response.setAnswer("当前版本暂不支持项目之间的归因分析与原因解释，请调整问题后重试。");
         response.setUsedProjects(List.of(projectId));
         return response;
     }

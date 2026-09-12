@@ -79,4 +79,15 @@ public final class AssistantQueryPlan {
     public static AssistantQueryPlan ofUnknown() {
         return new AssistantQueryPlan(AssistantIntent.UNKNOWN, true, true, false);
     }
+
+    /**
+     * COMPARISON（Phase 10）：跨项目 RAG 兜底 + 字段级结构化数据。
+     * 单项目全量 facts 关闭（fetchFacts=false）——比较结构化数据由
+     * ProjectComparisonService 按 (projectId, projectFormId, fieldCode) 事实单元
+     * 字段级拉取（追加约束 4），兑现"布尔位可平滑演进为字段级数据源描述"的演进承诺；
+     * RAG 仅作解释依据，数字结论只能来自 FieldComparisonCalculator（追加约束 11）。
+     */
+    public static AssistantQueryPlan ofComparison() {
+        return new AssistantQueryPlan(AssistantIntent.COMPARISON, false, true, false);
+    }
 }

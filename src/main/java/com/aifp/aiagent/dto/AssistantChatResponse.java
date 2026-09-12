@@ -58,4 +58,10 @@ public class AssistantChatResponse implements Serializable {
      */
     @JsonSerialize(contentUsing = ToStringSerializer.class)
     private List<Long> usedFiles = new ArrayList<>();
+
+    /**
+     * 跨项目比较数据（Phase 10，仅 COMPARISON 意图填充）：后端确定性计算的
+     * 排名/聚合/差值与排除明细；其余意图为 null
+     */
+    private CrossProjectComparisonVO comparisonData;
 }

@@ -1,5 +1,6 @@
 package com.aifp.aiagent.assistant;
 
+import com.aifp.aiagent.dto.CrossProjectComparisonVO;
 import com.aifp.aiagent.dto.ProjectStructuredFactsVO;
 import lombok.Builder;
 import lombok.Getter;
@@ -49,6 +50,13 @@ public class ProjectAssistantContext {
      * 项目结构化事实（未拉取时为 null；拉取后整体注入，含冲突标记）
      */
     private final ProjectStructuredFactsVO facts;
+
+    /**
+     * 跨项目比较数据（Phase 10，仅 COMPARISON 意图非 null）：后端
+     * FieldComparisonCalculator 确定性计算的排名/聚合/差值与排除明细；
+     * LLM 只能引用已算结果，禁止自行计算（追加约束 6/11）
+     */
+    private final CrossProjectComparisonVO comparison;
 
     /**
      * 项目范围 RAG 命中的文档片段（未拉取时为空集合）

@@ -1,5 +1,7 @@
 package com.aifp.aiagent.service.impl;
 
+import com.aifp.aiagent.dto.ProjectFieldDictionaryVO;
+import com.aifp.aiagent.dto.ProjectFieldFactVO;
 import com.aifp.aiagent.dto.ProjectStructuredFactsVO;
 import com.aifp.aiagent.dto.ProjectVO;
 import com.aifp.aiagent.entity.FileRecord;
@@ -91,7 +93,125 @@ public class ProjectQueryServiceImpl implements ProjectQueryService {
         return result;
     }
 
+    @Override
+    public List<ProjectFieldDictionaryVO> queryFieldDictionary(List<Long> projectIds) {
+        List<ProjectVO> projects = guardProjects(projectIds);
+        List<ProjectForm> activeForms = selectActiveForms(
+                projects.stream().map(ProjectVO::getProjectId).toList());
+        if (activeForms.isEmpty()) {
+            return List.of();
+        }
+        List<ProjectFormFieldValue> allValues = selectValuesByForms(
+                activeForms.stream().map(ProjectForm::getId).toList(), null);
+        // 字段快照去重：form id 升序（值行已按 projectFormId,id 升序）→ 每个 fieldCode 第一行定义即字典项
+        Map<String, ProjectFieldDictionaryVO> dictionary = new LinkedHashMap<>();
+        for (ProjectFormFieldValue row : allValues) {
+            dictionary.putIfAbsent(row.getFieldCode(), new ProjectFieldDictionaryVO(
+                    row.getFieldCode(), row.getFieldName(), row.getFieldType().getCode()));
+        }
+        return List.copyOf(dictionary.values());
+    }
+
+    @Override
+    public List<ProjectFieldFactVO> queryFieldFacts(List<Long> projectIds, String fieldCode) {
+        if (fieldCode == null || fieldCode.isBlank()) {
+            throw new IllegalArgumentException("fieldCode 不可为空白");
+        }
+        List<ProjectVO> projects = guardProjects(projectIds);
+        // projectId → projectName（跨项目比较展示用）
+        Map<Long, String> projectNameById = projects.stream().collect(
+                Collectors.toMap(ProjectVO::getProjectId, ProjectVO::getProjectName, (a, b) -> a));
+        List<ProjectForm> activeForms = selectActiveForms(
+                projects.stream().map(ProjectVO::getProjectId).toList());
+        List<ProjectFieldFactVO> result = new ArrayList<>();
+        if (activeForms.isEmpty()) {
+            return result;
+        }
+        // 单字段精查：仅该 fieldCode 的值行（事实单元 = (projectId, projectFormId, fieldCode)，追加约束 4）
+        List<ProjectFormFieldValue> rows = selectValuesByForms(
+                activeForms.stream().map(ProjectForm::getId).toList(), fieldCode);
+        Map<Long, String> fileNameMap = resolveFileNames(rows);
+        Map<Long, List<ProjectFormFieldValue>> rowsByForm = rows.stream().collect(
+                Collectors.groupingBy(ProjectFormFieldValue::getProjectFormId,
+                        LinkedHashMap::new, Collectors.toList()));
+        // 实例无值也输出空结构单元（不省略，供"项目X 未提供该字段数据"解释与无据判定）
+        for (ProjectForm form : activeForms) {
+            result.add(buildFactUnit(form,
+                    projectNameById.get(form.getProjectId()), fieldCode,
+                    rowsByForm.getOrDefault(form.getId(), List.of()), fileNameMap));
+        }
+        return result;
+    }
+
     // ==================== 内部方法 ====================
+
+    /**
+     * 跨项目参数防御 + 逐项目守门：projectIds 非空、不含 null 元素（Phase 6 pattern，
+     * 追加约束 9）；每个项目经 ProjectService 守门（403/6001）后返回 VO（含项目名）。
+     */
+    private List<ProjectVO> guardProjects(List<Long> projectIds) {
+        // 含 null 判定必须用流式 anyMatch：List.of 不可变列表 contains(null) 直接 NPE，
+        // 会使调用方无法得到约定的 IAE（防御逻辑自身不能成为异常源）
+        if (projectIds == null || projectIds.isEmpty()
+                || projectIds.stream().anyMatch(Objects::isNull)) {
+            throw new IllegalArgumentException("projectIds 不可为空或含 null 元素");
+        }
+        LinkedHashSet<Long> distinctIds = new LinkedHashSet<>(projectIds);
+        List<ProjectVO> projects = new ArrayList<>(distinctIds.size());
+        for (Long id : distinctIds) {
+            // 权限/存在性守门唯一入口（403/6001），不在此重复实现访问控制
+            projects.add(projectService.getProjectById(id));
+        }
+        return projects;
+    }
+
+    /**
+     * 批量查询 ACTIVE 表单实例（id 升序，输出稳定；约束 2/10）
+     */
+    private List<ProjectForm> selectActiveForms(List<Long> projectIds) {
+        return projectFormMapper.selectList(new LambdaQueryWrapper<ProjectForm>()
+                .in(ProjectForm::getProjectId, projectIds)
+                .eq(ProjectForm::getStatus, ProjectFormStatus.ACTIVE)
+                .orderByAsc(ProjectForm::getId));
+    }
+
+    /**
+     * 按 formIds 批量查值行（{@code @TableLogic} 自动过滤已删行）；
+     * fieldCode 非空时单字段精查（Phase 10 追加约束 4），null 时全量（字典去重用）。
+     * 排序 projectFormId,id 升序保证字典"form id 升序第一为准"语义。
+     */
+    private List<ProjectFormFieldValue> selectValuesByForms(List<Long> formIds, String fieldCode) {
+        LambdaQueryWrapper<ProjectFormFieldValue> wrapper = new LambdaQueryWrapper<ProjectFormFieldValue>()
+                .in(ProjectFormFieldValue::getProjectFormId, formIds);
+        if (fieldCode != null) {
+            wrapper.eq(ProjectFormFieldValue::getFieldCode, fieldCode);
+        }
+        wrapper.orderByAsc(ProjectFormFieldValue::getProjectFormId)
+                .orderByAsc(ProjectFormFieldValue::getId);
+        return fieldValueMapper.selectList(wrapper);
+    }
+
+    /**
+     * 组装跨项目字段事实单元：实例无值时 fieldName/fieldType 置 null
+     * （无定义快照可引用），交由计算层按"无数据"处理（追加约束 12）。
+     */
+    private ProjectFieldFactVO buildFactUnit(ProjectForm form, String projectName,
+                                             String fieldCode, List<ProjectFormFieldValue> formRows,
+                                             Map<Long, String> fileNameMap) {
+        ProjectFieldFactVO unit = new ProjectFieldFactVO();
+        unit.setProjectId(form.getProjectId());
+        unit.setProjectName(projectName);
+        unit.setProjectFormId(form.getId());
+        unit.setFieldCode(fieldCode);
+        if (!formRows.isEmpty()) {
+            ProjectFormFieldValue firstRow = formRows.get(0);
+            unit.setFieldName(firstRow.getFieldName());
+            unit.setFieldType(firstRow.getFieldType().getCode());
+            unit.setConflict(conflictResolver.hasConflict(formRows));
+            formRows.forEach(row -> unit.getValues().add(toValueItem(row, fileNameMap)));
+        }
+        return unit;
+    }
 
     /**
      * 组装单个表单实例 VO：字段值按 fieldCode 分组（LinkedHashMap 保持写入顺序），

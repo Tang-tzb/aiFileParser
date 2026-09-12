@@ -33,6 +33,9 @@ public class QueryPlanner {
             case DOCUMENT -> AssistantQueryPlan.ofDocument();
             case HYBRID -> AssistantQueryPlan.ofHybrid();
             case FILE_LIST -> AssistantQueryPlan.ofFileList();
+            // COMPARISON（Phase 10）：跨项目 RAG 兜底 + 字段级结构化数据
+            // （结构化数据由 ProjectComparisonService 专项拉取，非单项目全量 facts）
+            case COMPARISON -> AssistantQueryPlan.ofComparison();
             // UNKNOWN 保守降级为 HYBRID（§十六），Prompt 侧要求不得编造项目事实
             case UNKNOWN -> AssistantQueryPlan.ofUnknown();
             case UNSUPPORTED -> throw new IllegalArgumentException(

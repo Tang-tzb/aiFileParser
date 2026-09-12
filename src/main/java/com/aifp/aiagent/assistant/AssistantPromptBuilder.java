@@ -1,5 +1,6 @@
 package com.aifp.aiagent.assistant;
 
+import com.aifp.aiagent.dto.CrossProjectComparisonVO;
 import com.aifp.aiagent.dto.ProjectStructuredFactsVO;
 import lombok.RequiredArgsConstructor;
 import org.springframework.ai.document.Document;
@@ -32,20 +33,22 @@ public class AssistantPromptBuilder {
 
     /**
      * 反伪造 System Prompt（§二十三 1-10 条全量；措辞为追加约束 1 原文要求，
-     * 修改需同步评估 Prompt 效果与单元测试断言）
+     * 修改需同步评估 Prompt 效果与单元测试断言；Phase 10 调整第 8 条归因范围 +
+     * 新增第 11 条比较数据唯一来源规则）
      */
     private static final String SYSTEM_PROMPT = """
             你是项目资料智能助手，负责回答用户关于当前项目的问题。你必须严格遵守以下规则：
             1. 你不能访问数据库、Milvus 或其他外部数据；只能使用本次提供的项目事实和文档片段。
-            2. 项目事实（金额、面积、日期、单位、数量等）只能来自本次提供的【项目结构化字段事实】和【文档检索结果】；无法从本次提供的资料中得到依据的项目事实，必须回答"当前项目资料中没有找到足够依据"，禁止依据自身知识编造或补充。
+            2. 项目事实（金额、面积、日期、单位、数量等）只能来自本次提供的【项目结构化字段事实】【跨项目比较数据】和【文档检索结果】；无法从本次提供的资料中得到依据的项目事实，必须回答"当前项目资料中没有找到足够依据"，禁止依据自身知识编造或补充。
             3. 不确定或资料不足以完整回答时，必须如实说明，禁止猜测。
             4. 被标记为"冲突"的字段存在多个不同来源值：必须完整列出全部值及其来源文件与页码，禁止选择唯一值，禁止裁决哪个正确。
             5. 展示数值时优先使用 rawValue（用户可读值）+ unit（单位）；涉及比较或计算时只能使用 normalizedValue（后端标准值），禁止自行换算单位或解析业务数字。
             6. 引用文档内容时必须给出文件名和页码，便于用户核对。
             7. 与当前项目明显无关的问题，如实回答"不属于当前项目资料范围"，不要强行作答或编造。
-            8. 涉及项目之间比较、排序、统计、筛选和归因分析的问题，如实说明当前版本暂不支持此类能力。
+            8. 涉及项目之间归因分析、原因解释的问题（如为什么某项目投资比其他项目高），如实说明当前版本暂不支持此类能力。
             9. 只输出纯自然语言回答，禁止输出 JSON 或其他结构化格式。
-            10. 对话历史仅用于理解当前问题的指代关系（如"那、它、这个项目、还有呢"）；历史中提到的项目事实（金额、面积、日期、单位等）不能作为本次回答的依据，即使上一轮已经回答过，本轮涉及项目事实时仍必须以本次提供的【项目结构化字段事实】和【文档检索结果】为准。""";
+            10. 对话历史仅用于理解当前问题的指代关系（如"那、它、这个项目、还有呢"）；历史中提到的项目事实（金额、面积、日期、单位等）不能作为本次回答的依据，即使上一轮已经回答过，本轮涉及项目事实时仍必须以本次提供的【项目结构化字段事实】【跨项目比较数据】和【文档检索结果】为准。
+            11. 比较、排名、求和、平均、最大、最小、差值、百分比等跨项目数字结论只能引用【跨项目比较数据】中后端已计算的排名与聚合结果（rank/aggregates/diffFromCurrent/diffFromCurrentPercent），禁止自行计算、换算或派生任何数字（包括百分比）；【文档检索结果】中的数字仅可用于解释性表述，禁止作为比较计算依据；被标记为排除（冲突/值无法解析/单位不兼容/无数据）的实例必须如实说明其未参与本次数值计算。""";
 
     private final ChunkMetadataReader chunkMetadataReader;
 
@@ -69,6 +72,7 @@ public class AssistantPromptBuilder {
         sb.append("项目：").append(ctx.getProjectName()).append('\n');
         sb.append("用户问题：").append(ctx.getQuestion()).append('\n');
         renderHistory(sb, ctx.getHistory());
+        renderComparison(sb, ctx.getComparison());
         renderFacts(sb, ctx.getFacts());
         renderFileList(sb, ctx.getFileNames());
         renderDocuments(sb, ctx.getDocuments());
@@ -90,6 +94,99 @@ public class AssistantPromptBuilder {
         for (ConversationTurn turn : history) {
             sb.append("用户：").append(turn.getUserQuestion()).append('\n');
             sb.append("助手：").append(turn.getAssistantAnswer()).append('\n');
+        }
+    }
+
+    /**
+     * 渲染跨项目比较数据段（Phase 10，仅 COMPARISON 意图非 null）：字段维度 +
+     * 参与单元（排名/差值由后端算好，LLM 只引用，追加约束 6/11）+ 聚合行 +
+     * 排除单元（固定话术明确"未参与本次数值计算"，追加约束 5）；
+     * comparison=null 整段省略。
+     */
+    private void renderComparison(StringBuilder sb, CrossProjectComparisonVO comparison) {
+        if (comparison == null) {
+            return;
+        }
+        sb.append("\n【跨项目比较数据】（以下排名与聚合结果均由后端计算完成，只能直接引用，禁止重新计算）\n");
+        sb.append("字段[").append(comparison.getFieldName())
+                .append(" fieldCode=").append(comparison.getFieldCode())
+                .append(" 类型=").append(comparison.getFieldType()).append("]\n");
+        for (CrossProjectComparisonVO.Unit unit : comparison.getUnits()) {
+            renderComparisonUnit(sb, comparison, unit);
+        }
+        renderComparisonAggregates(sb, comparison);
+        for (CrossProjectComparisonVO.ExcludedUnit excluded : comparison.getExcluded()) {
+            renderExcludedUnit(sb, excluded);
+        }
+    }
+
+    /**
+     * 渲染单个参与单元：排名 + 项目/实例 + 值（rawValue+normalized+单位）+
+     * 与当前项目差值（后端已算，追加约束 6）；rank=null（非数值字段）时如实省略名次。
+     */
+    private void renderComparisonUnit(StringBuilder sb, CrossProjectComparisonVO comparison,
+                                      CrossProjectComparisonVO.Unit unit) {
+        sb.append("- ");
+        if (unit.getRank() != null) {
+            sb.append("排名#").append(unit.getRank()).append(' ');
+        }
+        sb.append("项目[").append(unit.getProjectName()).append(" projectId=")
+                .append(unit.getProjectId()).append("] 表单实例=").append(unit.getProjectFormId())
+                .append(" 值: ").append(unit.getRawValue());
+        if (unit.getNormalizedValue() != null) {
+            sb.append("（normalized: ").append(unit.getNormalizedValue());
+            if (unit.getUnit() != null) {
+                sb.append("，单位: ").append(unit.getUnit());
+            }
+            sb.append('）');
+        }
+        if (unit.getDiffFromCurrent() != null) {
+            sb.append(" 与当前项目差值: ").append(unit.getDiffFromCurrent());
+            if (unit.getDiffFromCurrentPercent() != null) {
+                sb.append("（").append(unit.getDiffFromCurrentPercent()).append("）");
+            }
+        }
+        if (unit.getSourceFileName() != null) {
+            sb.append(" 来源: ").append(unit.getSourceFileName());
+            if (unit.getSourcePage() != null) {
+                sb.append(" 第").append(unit.getSourcePage()).append("页");
+            }
+        }
+        sb.append('\n');
+    }
+
+    /**
+     * 渲染聚合行（仅数值字段有 aggregates；追加约束 7：avg 固定 scale=4）
+     */
+    private void renderComparisonAggregates(StringBuilder sb, CrossProjectComparisonVO comparison) {
+        CrossProjectComparisonVO.Aggregates aggregates = comparison.getAggregates();
+        if (aggregates == null) {
+            return;
+        }
+        sb.append("- 聚合（后端计算）：最大=").append(aggregates.getMax())
+                .append("，最小=").append(aggregates.getMin())
+                .append("，总和=").append(aggregates.getSum())
+                .append("，平均=").append(aggregates.getAvg())
+                .append("，数量=").append(aggregates.getCount()).append('\n');
+    }
+
+    /**
+     * 渲染排除单元（追加约束 5：可解释、禁止静默丢弃）：
+     * 固定话术"未参与本次数值计算" + 全部来源值明细
+     */
+    private void renderExcludedUnit(StringBuilder sb, CrossProjectComparisonVO.ExcludedUnit excluded) {
+        String reasonLabel = switch (excluded.getReason()) {
+            case "CONFLICT" -> "该字段存在冲突";
+            case "UNPARSEABLE" -> "该字段值无法解析";
+            case "UNIT_INCOMPATIBLE" -> "该字段单位与基准单位不一致";
+            default -> "该字段无数据";
+        };
+        sb.append("- ⚠ 项目[").append(excluded.getProjectName()).append(" projectId=")
+                .append(excluded.getProjectId()).append("] 表单实例=")
+                .append(excluded.getProjectFormId()).append('（').append(reasonLabel)
+                .append("），因此未参与本次数值计算\n");
+        for (ProjectStructuredFactsVO.ValueItem item : excluded.getValues()) {
+            sb.append("  - ").append(renderValueItem(item)).append('\n');
         }
     }
 

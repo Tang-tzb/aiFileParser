@@ -194,6 +194,7 @@ class QueryIntentAnalyzerTest {
         String system = messages.get(0).getText();
         assertThat(system)
                 .contains("STRUCTURED").contains("UNSUPPORTED").contains("UNKNOWN")
+                .contains("COMPARISON")
                 .contains("{\"intent\":")
                 .contains("禁止编造或扩展问题内容");
         String user = ((UserMessage) messages.get(1)).getText();

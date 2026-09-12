@@ -1,6 +1,8 @@
 package com.aifp.aiagent.service.impl;
 
 import com.aifp.aiagent.common.ResultCode;
+import com.aifp.aiagent.dto.ProjectFieldDictionaryVO;
+import com.aifp.aiagent.dto.ProjectFieldFactVO;
 import com.aifp.aiagent.dto.ProjectStructuredFactsVO;
 import com.aifp.aiagent.dto.ProjectVO;
 import com.aifp.aiagent.entity.FileRecord;
@@ -27,6 +29,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -50,6 +53,7 @@ import static org.mockito.Mockito.*;
 class ProjectQueryServiceImplTest {
 
     private static final Long PROJECT_ID = 1785900001L;
+    private static final Long PROJECT_ID_2 = 1785900002L;
     private static final Long FORM_ID = 1785700001L;
     private static final Long PROJECT_FORM_ID = 1785600001L;
     private static final Long PROJECT_FORM_ID_2 = 1785600002L;
@@ -347,6 +351,227 @@ class ProjectQueryServiceImplTest {
         verifyNoInteractions(projectFormMapper, fieldValueMapper, fileRecordMapper);
     }
 
+    // ==================== Phase 10 增量：queryFieldDictionary ====================
+
+    /**
+     * 字典按 fieldCode 去重、每个 fieldCode 保留首个出现（form id 升序）的定义快照，
+     * 跨项目/跨实例同 fieldCode 只出一个字典项
+     */
+    @Test
+    void fieldDictionary_dedupesByFieldCodeKeepingFirstDefinition() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(projectService.getProjectById(PROJECT_ID_2)).thenReturn(projectVO2());
+        when(projectFormMapper.selectList(any())).thenReturn(List.of(
+                form(PROJECT_FORM_ID), form2(PROJECT_FORM_ID_2, PROJECT_ID_2)));
+        when(fieldValueMapper.selectList(any())).thenReturn(List.of(
+                value(PROJECT_FORM_ID, FIELD_AMOUNT, "100万", "1000000", FILE_A),
+                value(PROJECT_FORM_ID, "building_area", "100平米", "100", null),
+                value2(PROJECT_FORM_ID_2, FIELD_AMOUNT, "200万", "2000000", FILE_B, "总投资")));
+
+        List<ProjectFieldDictionaryVO> dictionary = queryService.queryFieldDictionary(
+                List.of(PROJECT_ID, PROJECT_ID_2));
+
+        assertThat(dictionary).hasSize(2);
+        // 首个出现（form id 升序第一行）的定义为准
+        assertThat(dictionary.get(0).getFieldCode()).isEqualTo(FIELD_AMOUNT);
+        assertThat(dictionary.get(0).getFieldName()).isEqualTo("总投资金额");
+        assertThat(dictionary.get(0).getFieldType()).isEqualTo(FieldType.DECIMAL.getCode());
+        assertThat(dictionary.get(1).getFieldCode()).isEqualTo("building_area");
+        // 字典查询不解析来源文件名
+        verifyNoInteractions(fileRecordMapper);
+    }
+
+    /**
+     * 可访问项目均无 ACTIVE 实例 → 空字典（非错误），不触发字段值查询
+     */
+    @Test
+    void fieldDictionary_noActiveForms_returnsEmptyWithoutValueQuery() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(projectFormMapper.selectList(any())).thenReturn(List.of());
+
+        assertThat(queryService.queryFieldDictionary(List.of(PROJECT_ID))).isEmpty();
+        verifyNoInteractions(fieldValueMapper, fileRecordMapper);
+    }
+
+    /**
+     * 跨项目参数防御（追加约束 9）：projectIds null/空/含 null → IAE 快速失败，
+     * 零依赖交互
+     */
+    @Test
+    void crossProjectQueries_illegalProjectIds_throwsIAE() {
+        assertThatThrownBy(() -> queryService.queryFieldDictionary(null))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> queryService.queryFieldDictionary(List.of()))
+                .isInstanceOf(IllegalArgumentException.class);
+        // 含 null 用 Arrays.asList 构造：List.of 遇 null 元素在构造期即 NPE，
+        // 无法到达实现类约定的 IAE 防御
+        assertThatThrownBy(() -> queryService.queryFieldDictionary(Arrays.asList(PROJECT_ID, null)))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> queryService.queryFieldFacts(null, FIELD_AMOUNT))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> queryService.queryFieldFacts(List.of(PROJECT_ID), " "))
+                .isInstanceOf(IllegalArgumentException.class);
+        verifyNoInteractions(projectService, projectFormMapper, fieldValueMapper, fileRecordMapper);
+    }
+
+    /**
+     * 字典查询逐项目守门（403/6001 唯一入口），本服务不重复实现访问控制
+     */
+    @Test
+    void fieldDictionary_accessDenied_propagates403() {
+        when(projectService.getProjectById(PROJECT_ID)).thenThrow(new BusinessException(ResultCode.FORBIDDEN));
+
+        assertThatThrownBy(() -> queryService.queryFieldDictionary(List.of(PROJECT_ID)))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.FORBIDDEN.getCode()));
+        verifyNoInteractions(projectFormMapper, fieldValueMapper, fileRecordMapper);
+    }
+
+    // ==================== Phase 10 增量：queryFieldFacts ====================
+
+    /**
+     * 追加约束 4：事实单元 = (projectId, projectFormId, fieldCode)——跨项目同
+     * fieldCode 各自独立单元，projectId/projectName 随单元透出
+     */
+    @Test
+    void fieldFacts_crossProjectUnitsKeptSeparate() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(projectService.getProjectById(PROJECT_ID_2)).thenReturn(projectVO2());
+        when(projectFormMapper.selectList(any())).thenReturn(List.of(
+                form(PROJECT_FORM_ID), form2(PROJECT_FORM_ID_2, PROJECT_ID_2)));
+        when(fieldValueMapper.selectList(any())).thenReturn(List.of(
+                value(PROJECT_FORM_ID, FIELD_AMOUNT, "100万", "1000000", FILE_A),
+                value2(PROJECT_FORM_ID_2, FIELD_AMOUNT, "200万", "2000000", FILE_B, "总投资")));
+        when(fileRecordMapper.selectBatchIds(anyCollection())).thenReturn(List.of());
+
+        List<ProjectFieldFactVO> facts = queryService.queryFieldFacts(
+                List.of(PROJECT_ID, PROJECT_ID_2), FIELD_AMOUNT);
+
+        assertThat(facts).hasSize(2);
+        ProjectFieldFactVO first = facts.get(0);
+        assertThat(first.getProjectId()).isEqualTo(PROJECT_ID);
+        assertThat(first.getProjectName()).isEqualTo("测试项目");
+        assertThat(first.getProjectFormId()).isEqualTo(PROJECT_FORM_ID);
+        assertThat(first.getFieldCode()).isEqualTo(FIELD_AMOUNT);
+        assertThat(first.getFieldType()).isEqualTo(FieldType.DECIMAL.getCode());
+        assertThat(first.isConflict()).isFalse();
+        assertThat(first.getValues()).hasSize(1);
+        assertThat(first.getValues().get(0).getRawValue()).isEqualTo("100万");
+        ProjectFieldFactVO second = facts.get(1);
+        assertThat(second.getProjectId()).isEqualTo(PROJECT_ID_2);
+        assertThat(second.getProjectName()).isEqualTo("项目B");
+        assertThat(second.getValues().get(0).getRawValue()).isEqualTo("200万");
+    }
+
+    /**
+     * 同项目两个 ProjectForm 同 fieldCode → 两个独立事实单元（追加约束 4：
+     * 不同表单实例不得因 fieldCode 相同而合并）
+     */
+    @Test
+    void fieldFacts_sameProjectTwoForms_twoIndependentUnits() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(projectFormMapper.selectList(any())).thenReturn(List.of(
+                form(PROJECT_FORM_ID), form(PROJECT_FORM_ID_2)));
+        when(fieldValueMapper.selectList(any())).thenReturn(List.of(
+                value(PROJECT_FORM_ID, FIELD_AMOUNT, "100万", "1000000", FILE_A),
+                value(PROJECT_FORM_ID_2, FIELD_AMOUNT, "200万", "2000000", FILE_B)));
+        when(fileRecordMapper.selectBatchIds(anyCollection())).thenReturn(List.of());
+
+        List<ProjectFieldFactVO> facts = queryService.queryFieldFacts(
+                List.of(PROJECT_ID), FIELD_AMOUNT);
+
+        assertThat(facts).hasSize(2);
+        assertThat(facts).extracting(ProjectFieldFactVO::getProjectFormId)
+                .containsExactly(PROJECT_FORM_ID, PROJECT_FORM_ID_2);
+        assertThat(facts).allMatch(fact -> fact.getProjectId().equals(PROJECT_ID));
+    }
+
+    /**
+     * 实例无该字段值 → 输出空结构单元（不省略，供"项目X 未提供该字段数据"
+     * 解释与无据判定，追加约束 12）；fieldName/fieldType 无定义快照置 null
+     */
+    @Test
+    void fieldFacts_formWithoutValues_emptyUnitWithNullMeta() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(projectFormMapper.selectList(any())).thenReturn(List.of(form(PROJECT_FORM_ID)));
+        when(fieldValueMapper.selectList(any())).thenReturn(List.of());
+
+        List<ProjectFieldFactVO> facts = queryService.queryFieldFacts(
+                List.of(PROJECT_ID), FIELD_AMOUNT);
+
+        assertThat(facts).hasSize(1);
+        ProjectFieldFactVO unit = facts.get(0);
+        assertThat(unit.getProjectFormId()).isEqualTo(PROJECT_FORM_ID);
+        assertThat(unit.getValues()).isEmpty();
+        assertThat(unit.getFieldName()).isNull();
+        assertThat(unit.getFieldType()).isNull();
+        assertThat(unit.isConflict()).isFalse();
+        verifyNoInteractions(fileRecordMapper);
+    }
+
+    /**
+     * 同实例双来源不同值 → 单元 conflict=true，全部来源值保留（硬约束 ⑧ 冲突完整语义）
+     */
+    @Test
+    void fieldFacts_sameFormConflictingValues_conflictFlaggedWithAllSources() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(projectFormMapper.selectList(any())).thenReturn(List.of(form(PROJECT_FORM_ID)));
+        when(fieldValueMapper.selectList(any())).thenReturn(List.of(
+                value(PROJECT_FORM_ID, FIELD_AMOUNT, "100万", "1000000", FILE_A),
+                value(PROJECT_FORM_ID, FIELD_AMOUNT, "200万", "2000000", FILE_B)));
+        when(fileRecordMapper.selectBatchIds(anyCollection())).thenReturn(List.of(
+                fileRecord(FILE_A, "预算说明书.pdf"), fileRecord(FILE_B, "可研报告.pdf")));
+
+        List<ProjectFieldFactVO> facts = queryService.queryFieldFacts(
+                List.of(PROJECT_ID), FIELD_AMOUNT);
+
+        ProjectFieldFactVO unit = facts.get(0);
+        assertThat(unit.isConflict()).isTrue();
+        assertThat(unit.getValues()).hasSize(2);
+        assertThat(unit.getValues().get(0).getSourceFileName()).isEqualTo("预算说明书.pdf");
+        assertThat(unit.getValues().get(1).getSourceFileName()).isEqualTo("可研报告.pdf");
+    }
+
+    /**
+     * 单字段精查：字段值查询 wrapper 携带 field_code 等值条件（Phase 10 追加约束 4）；
+     * 实例查询 wrapper 携带 project_id IN + status=ACTIVE
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void fieldFacts_valueQueryFilteredByFieldCode() {
+        when(projectService.getProjectById(PROJECT_ID)).thenReturn(projectVO());
+        when(projectFormMapper.selectList(any())).thenReturn(List.of(form(PROJECT_FORM_ID)));
+        when(fieldValueMapper.selectList(any())).thenReturn(List.of());
+
+        queryService.queryFieldFacts(List.of(PROJECT_ID), FIELD_AMOUNT);
+
+        ArgumentCaptor<LambdaQueryWrapper<ProjectFormFieldValue>> valueCaptor =
+                ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(fieldValueMapper).selectList(valueCaptor.capture());
+        LambdaQueryWrapper<ProjectFormFieldValue> valueWrapper = valueCaptor.getValue();
+        assertThat(valueWrapper.getSqlSegment()).contains("project_form_id").contains("field_code");
+        assertThat(valueWrapper.getParamNameValuePairs().values())
+                .extracting(String::valueOf)
+                .contains(FIELD_AMOUNT);
+        ArgumentCaptor<LambdaQueryWrapper<ProjectForm>> formCaptor =
+                ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(projectFormMapper).selectList(formCaptor.capture());
+        assertThat(formCaptor.getValue().getSqlSegment()).contains("project_id").contains("status");
+    }
+
+    /**
+     * 字段事实查询守门唯一入口复用（403）
+     */
+    @Test
+    void fieldFacts_accessDenied_propagates403() {
+        when(projectService.getProjectById(PROJECT_ID)).thenThrow(new BusinessException(ResultCode.FORBIDDEN));
+
+        assertThatThrownBy(() -> queryService.queryFieldFacts(List.of(PROJECT_ID), FIELD_AMOUNT))
+                .isInstanceOfSatisfying(BusinessException.class, e ->
+                        assertThat(e.getCode()).isEqualTo(ResultCode.FORBIDDEN.getCode()));
+        verifyNoInteractions(projectFormMapper, fieldValueMapper, fileRecordMapper);
+    }
+
     // ==================== 测试辅助 ====================
 
     /**
@@ -364,10 +589,27 @@ class ProjectQueryServiceImplTest {
         return vo;
     }
 
+    /**
+     * 第二个项目 VO（Phase 10 跨项目用例）
+     */
+    private ProjectVO projectVO2() {
+        ProjectVO vo = new ProjectVO();
+        vo.setProjectId(PROJECT_ID_2);
+        vo.setProjectName("项目B");
+        return vo;
+    }
+
     private ProjectForm form(Long projectFormId) {
+        return form2(projectFormId, PROJECT_ID);
+    }
+
+    /**
+     * 指定归属项目的表单实例（Phase 10 跨项目用例）
+     */
+    private ProjectForm form2(Long projectFormId, Long projectId) {
         ProjectForm form = new ProjectForm();
         form.setId(projectFormId);
-        form.setProjectId(PROJECT_ID);
+        form.setProjectId(projectId);
         form.setFormId(FORM_ID);
         form.setVersion(1);
         form.setStatus(ProjectFormStatus.ACTIVE);
@@ -389,6 +631,17 @@ class ProjectQueryServiceImplTest {
         value.setSourcePage(3);
         value.setSourceChunkId("chunk-" + fileId);
         value.setConfidence(new BigDecimal("0.95"));
+        return value;
+    }
+
+    /**
+     * 自定义 fieldName 的值行（Phase 10 跨项目字典/事实用例）
+     */
+    private ProjectFormFieldValue value2(Long projectFormId, String fieldCode,
+                                         String rawValue, String normalizedValue,
+                                         Long fileId, String fieldName) {
+        ProjectFormFieldValue value = value(projectFormId, fieldCode, rawValue, normalizedValue, fileId);
+        value.setFieldName(fieldName);
         return value;
     }
 

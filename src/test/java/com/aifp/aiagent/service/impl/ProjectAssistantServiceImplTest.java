@@ -57,6 +57,8 @@ class ProjectAssistantServiceImplTest {
     private static final Long PROJECT_FORM_ID = 1785600001L;
     private static final Long FILE_A = 1785800001L;
     private static final Long FILE_B = 1785800002L;
+    private static final Long TARGET_PROJECT_ID = 1785900002L;
+    private static final Long TARGET_FORM_ID = 1785600002L;
     private static final String MESSAGE = "这个项目总投资是多少？";
 
     @Mock
@@ -70,6 +72,8 @@ class ProjectAssistantServiceImplTest {
     @Mock
     private ConversationHistoryStore conversationHistoryStore;
     @Mock
+    private ProjectComparisonService comparisonService;
+    @Mock
     private ChatModel chatModel;
 
     private ProjectAssistantServiceImpl service;
@@ -80,7 +84,8 @@ class ProjectAssistantServiceImplTest {
                 projectService, projectQueryService, projectRetrievalService,
                 queryIntentAnalyzer, new QueryPlanner(),
                 new AssistantPromptBuilder(new ChunkMetadataReader()),
-                new ChunkMetadataReader(), conversationHistoryStore, chatModel);
+                new ChunkMetadataReader(), conversationHistoryStore,
+                comparisonService, chatModel);
         ReflectionTestUtils.setField(service, "assistantTopK", 5);
         ReflectionTestUtils.setField(service, "maxInjectedTurns", 6);
     }
@@ -153,7 +158,8 @@ class ProjectAssistantServiceImplTest {
 
     /**
      * UNSUPPORTED → 意图识别后立即返回确定性文案，零 LLM 零检索零事实查询零文件清单；
-     * 追加约束 5：记录真实交互（assistantAnswer = 实际返回给用户的固定文案）
+     * Phase 10 文案收窄（追加约束 13）：仅归因分析不支持；追加约束 5：记录真实交互
+     * （assistantAnswer = 实际返回给用户的固定文案）
      */
     @Test
     void chat_unsupported_shortCircuitWithDeterministicAnswer() {
@@ -166,7 +172,7 @@ class ProjectAssistantServiceImplTest {
         AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
 
         assertThat(resp.getAnswer())
-                .contains("当前版本暂不支持项目之间的比较、排序、统计、筛选和归因分析");
+                .contains("当前版本暂不支持项目之间的归因分析与原因解释");
         assertThat(resp.getReferences()).isEmpty();
         assertThat(resp.getStructuredData()).isEmpty();
         assertThat(resp.getUsedProjects()).containsExactly(PROJECT_ID);
@@ -174,7 +180,7 @@ class ProjectAssistantServiceImplTest {
         verifyNoInteractions(projectQueryService, projectRetrievalService, chatModel);
         verify(projectService, never()).listProjectFiles(any(), any());
         verify(conversationHistoryStore).appendTurn(eq(PROJECT_ID), anyString(), eq(MESSAGE),
-                eq("当前版本暂不支持项目之间的比较、排序、统计、筛选和归因分析，请调整问题后重试。"));
+                eq("当前版本暂不支持项目之间的归因分析与原因解释，请调整问题后重试。"));
     }
 
     // ==================== 意图路由（§十七 + 追加约束 2） ====================
@@ -291,6 +297,70 @@ class ProjectAssistantServiceImplTest {
 
         verify(projectQueryService).queryProjectFacts(PROJECT_ID);
         verify(projectRetrievalService).retrieve(PROJECT_ID, MESSAGE, 5);
+    }
+
+    // ==================== Phase 10 COMPARISON 分支 ====================
+
+    /**
+     * COMPARISON 成功路径：比较编排先行（不拉单项目全量事实）→ RAG 仅解释依据 →
+     * 最终 LLM 只能引用已算结果；comparisonData 返回、比较证据并入
+     * references/usedFiles、usedProjects = 当前 ∪ 目标（追加约束 6/9/11）
+     */
+    @Test
+    void chat_comparison_success_returnsComparisonDataWithEvidence() {
+        stubCommon(AssistantIntent.COMPARISON);
+        CrossProjectComparisonVO comparison = comparisonVO();
+        when(comparisonService.compare(PROJECT_ID, MESSAGE))
+                .thenReturn(ProjectComparisonService.ComparisonOutcome.of(comparison));
+        stubRag(List.of(ragDoc()));
+        stubAnswer("项目B投资最高。");
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+
+        // 比较编排先行；单项目全量事实零查询（字段级事实由比较服务内部拉取）
+        verify(comparisonService).compare(PROJECT_ID, MESSAGE);
+        verifyNoInteractions(projectQueryService);
+        // RAG 以 standaloneQuestion 执行，仅解释依据
+        verify(projectRetrievalService).retrieve(PROJECT_ID, MESSAGE, 5);
+        assertThat(resp.getComparisonData()).isSameAs(comparison);
+        // references = 参与单元 + 排除单元来源值（STRUCTURED）+ RAG 命中（FILE）
+        assertThat(resp.getReferences()).hasSize(3);
+        assertThat(resp.getReferences()).extracting(AssistantReferenceVO::getType)
+                .containsExactly("STRUCTURED", "STRUCTURED", "FILE");
+        assertThat(resp.getReferences().get(0).getFieldCode()).isEqualTo("total_investment");
+        assertThat(resp.getReferences().get(0).getRawValue()).isEqualTo("200万");
+        assertThat(resp.getReferences().get(1).getRawValue()).isEqualTo("300万");
+        // usedFiles = 比较来源（参与 FILE_B + 排除 FILE_A）∪ RAG 命中 FILE_A 去重
+        assertThat(resp.getUsedFiles()).containsExactly(FILE_B, FILE_A);
+        // usedProjects = 当前项目 ∪ 目标项目升序
+        assertThat(resp.getUsedProjects()).containsExactly(PROJECT_ID, TARGET_PROJECT_ID);
+        // 回答经最终 LLM 生成并后置入历史
+        assertThat(resp.getAnswer()).isEqualTo("项目B投资最高。");
+        verify(conversationHistoryStore).appendTurn(
+                PROJECT_ID, resp.getConversationId(), MESSAGE, "项目B投资最高。");
+    }
+
+    /**
+     * COMPARISON 降级路径（追加约束 2/12）：确定性文案直接返回——零后续 RAG、
+     * 零最终 LLM、零事实查询；comparisonData=null；确定性答案忠实入历史
+     */
+    @Test
+    void chat_comparison_fallback_deterministicAnswerWithoutRagOrLlm() {
+        stubCommon(AssistantIntent.COMPARISON);
+        String fallback = "无法确定比较范围：问题未明确参与比较的项目，请补充项目名称。";
+        when(comparisonService.compare(PROJECT_ID, MESSAGE))
+                .thenReturn(ProjectComparisonService.ComparisonOutcome.fallback(fallback));
+
+        AssistantChatResponse resp = service.chat(PROJECT_ID, req(MESSAGE));
+
+        assertThat(resp.getAnswer()).isEqualTo(fallback);
+        assertThat(resp.getComparisonData()).isNull();
+        assertThat(resp.getReferences()).isEmpty();
+        assertThat(resp.getStructuredData()).isEmpty();
+        assertThat(resp.getUsedProjects()).containsExactly(PROJECT_ID);
+        verifyNoInteractions(projectRetrievalService, projectQueryService, chatModel);
+        verify(conversationHistoryStore).appendTurn(
+                eq(PROJECT_ID), anyString(), eq(MESSAGE), eq(fallback));
     }
 
     // ==================== 回答 LLM 错误边界（追加约束 11） ====================
@@ -584,5 +654,47 @@ class ProjectAssistantServiceImplTest {
 
     private ChatResponse chatResponse(String content) {
         return new ChatResponse(List.of(new Generation(new AssistantMessage(content))));
+    }
+
+    /**
+     * 跨项目比较结果样本（Phase 10）：1 参与单元（目标项目，来源 FILE_B）+
+     * 1 排除单元（当前项目冲突，来源 FILE_A）
+     */
+    private CrossProjectComparisonVO comparisonVO() {
+        CrossProjectComparisonVO.Unit unit = new CrossProjectComparisonVO.Unit();
+        unit.setProjectId(TARGET_PROJECT_ID);
+        unit.setProjectName("项目B");
+        unit.setProjectFormId(TARGET_FORM_ID);
+        unit.setRawValue("200万");
+        unit.setNormalizedValue("2000000");
+        unit.setUnit("万元");
+        unit.setRank(1);
+        unit.setSourceFileId(FILE_B);
+        unit.setSourceFileName("项目B预算.pdf");
+        unit.setSourcePage(2);
+
+        ProjectStructuredFactsVO.ValueItem excludedValue = new ProjectStructuredFactsVO.ValueItem();
+        excludedValue.setRawValue("300万");
+        excludedValue.setNormalizedValue("3000000");
+        excludedValue.setUnit("万元");
+        excludedValue.setSourceFileId(FILE_A);
+        excludedValue.setSourceFileName("预算说明书.pdf");
+        CrossProjectComparisonVO.ExcludedUnit excluded = new CrossProjectComparisonVO.ExcludedUnit();
+        excluded.setReason("CONFLICT");
+        excluded.setProjectId(PROJECT_ID);
+        excluded.setProjectName("示范项目");
+        excluded.setProjectFormId(PROJECT_FORM_ID);
+        excluded.setFieldCode("total_investment");
+        excluded.getValues().add(excludedValue);
+
+        CrossProjectComparisonVO comparison = new CrossProjectComparisonVO();
+        comparison.setFieldCode("total_investment");
+        comparison.setFieldName("总投资金额");
+        comparison.setFieldType(FieldType.DECIMAL.getCode());
+        comparison.setCurrentProjectId(PROJECT_ID);
+        comparison.getTargetProjectIds().add(TARGET_PROJECT_ID);
+        comparison.getUnits().add(unit);
+        comparison.getExcluded().add(excluded);
+        return comparison;
     }
 }

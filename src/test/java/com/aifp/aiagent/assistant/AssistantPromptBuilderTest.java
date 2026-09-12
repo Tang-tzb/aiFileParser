@@ -1,5 +1,6 @@
 package com.aifp.aiagent.assistant;
 
+import com.aifp.aiagent.dto.CrossProjectComparisonVO;
 import com.aifp.aiagent.dto.ProjectStructuredFactsVO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -57,7 +58,11 @@ class AssistantPromptBuilderTest {
                 .contains("禁止输出 JSON")
                 // Phase 9 追加约束 1：历史非事实源（即使上轮已回答过也要重新取依据）
                 .contains("对话历史仅用于理解当前问题的指代关系")
-                .contains("不能作为本次回答的依据");
+                .contains("不能作为本次回答的依据")
+                // Phase 10 第 11 条：比较数字结论只能引用后端已算结果，禁止自算
+                .contains("只能引用【跨项目比较数据】中后端已计算的排名与聚合结果")
+                .contains("禁止自行计算、换算或派生任何数字")
+                .contains("被标记为排除（冲突/值无法解析/单位不兼容/无数据）的实例必须如实说明其未参与本次数值计算");
     }
 
     // ==================== User Prompt：对话历史段（Phase 9） ====================
@@ -223,6 +228,79 @@ class AssistantPromptBuilderTest {
         assertThat(user).contains("[D1] 来源: 文件A.pdf 第1页").contains("[D2] 来源: 文件B.pdf 第2页");
     }
 
+    // ==================== User Prompt：跨项目比较数据段（Phase 10） ====================
+
+    /**
+     * 比较段渲染（追加约束 5/6/7/11）：标题含"只能直接引用，禁止重新计算"；
+     * 参与单元渲染排名/项目/实例/值/差值/来源；聚合行全量呈现（avg scale=4）；
+     * 排除单元固定话术"因此未参与本次数值计算"且全部来源值随行；
+     * 比较段位于事实段之前
+     */
+    @Test
+    void userPrompt_comparisonRenderedWithUnitsAggregatesAndExcluded() {
+        ProjectAssistantContext ctx = ProjectAssistantContext.builder()
+                .projectName("示范项目")
+                .question("当前项目和项目B总投资比较")
+                .comparison(comparison())
+                .facts(factsWithConflict())
+                .factsUsed(true)
+                .build();
+
+        String user = builder.buildUserPrompt(ctx);
+
+        assertThat(user)
+                .contains("【跨项目比较数据】（以下排名与聚合结果均由后端计算完成，只能直接引用，禁止重新计算）")
+                .contains("字段[总投资金额 fieldCode=total_investment 类型=DECIMAL]")
+                .contains("- 排名#1 项目[项目B projectId=1785900002] 表单实例=1785600002 值: 200万"
+                        + "（normalized: 2000000，单位: 万元） 与当前项目差值: 1000000（0.5）"
+                        + " 来源: 项目B预算.pdf 第2页")
+                .contains("- 聚合（后端计算）：最大=2000000，最小=1000000，总和=3000000，"
+                        + "平均=1500000.0000，数量=2")
+                .contains("- ⚠ 项目[示范项目 projectId=1785900001] 表单实例=1785600001"
+                        + "（该字段存在冲突），因此未参与本次数值计算")
+                .contains("  - 值: 300万（normalized: 3000000，单位: 万元） 来源: 预算说明书.pdf 第3页");
+        // 比较段在事实段之前（先给比较结论语境，再给本项目全量事实）
+        assertThat(user.indexOf("【跨项目比较数据】")).isLessThan(user.indexOf("【项目结构化字段事实】"));
+    }
+
+    /**
+     * 非 COMPARISON 意图（comparison=null）→ 比较段整段省略
+     */
+    @Test
+    void userPrompt_nullComparisonOmitted() {
+        ProjectAssistantContext ctx = ProjectAssistantContext.builder()
+                .projectName("示范项目").question("问题")
+                .build();
+
+        assertThat(builder.buildUserPrompt(ctx)).doesNotContain("【跨项目比较数据】");
+    }
+
+    /**
+     * rank=null（非数值字段仅列值）→ 名次如实省略；无聚合（aggregates=null）→
+     * 聚合行省略；差值 null → 差值部分省略
+     */
+    @Test
+    void userPrompt_nonNumericComparisonOmitsRankAndAggregates() {
+        CrossProjectComparisonVO comparison = comparison();
+        comparison.setFieldType("STRING");
+        comparison.setAggregates(null);
+        comparison.getUnits().get(0).setRank(null);
+        comparison.getUnits().get(0).setDiffFromCurrent(null);
+        comparison.getUnits().get(0).setDiffFromCurrentPercent(null);
+        ProjectAssistantContext ctx = ProjectAssistantContext.builder()
+                .projectName("示范项目").question("比较")
+                .comparison(comparison)
+                .build();
+
+        String user = builder.buildUserPrompt(ctx);
+
+        assertThat(user)
+                .contains("- 项目[项目B projectId=1785900002]")
+                .doesNotContain("排名#")
+                .doesNotContain("聚合（后端计算）")
+                .doesNotContain("与当前项目差值");
+    }
+
     // ==================== 测试辅助 ====================
 
     /**
@@ -283,5 +361,56 @@ class AssistantPromptBuilderTest {
                 .assistantAnswer(answer)
                 .createTime(java.time.LocalDateTime.now())
                 .build();
+    }
+
+    /**
+     * 跨项目比较结果样本（Phase 10）：1 参与单元（项目B，rank=1、diff=1000000、
+     * percent=0.5）+ 聚合（avg=1500000.0000）+ 1 冲突排除单元（当前项目，含 1 来源值）
+     */
+    private CrossProjectComparisonVO comparison() {
+        CrossProjectComparisonVO.Unit unit = new CrossProjectComparisonVO.Unit();
+        unit.setProjectId(1785900002L);
+        unit.setProjectName("项目B");
+        unit.setProjectFormId(1785600002L);
+        unit.setRawValue("200万");
+        unit.setNormalizedValue("2000000");
+        unit.setUnit("万元");
+        unit.setRank(1);
+        unit.setDiffFromCurrent(new BigDecimal("1000000"));
+        unit.setDiffFromCurrentPercent(new BigDecimal("0.5"));
+        unit.setSourceFileName("项目B预算.pdf");
+        unit.setSourcePage(2);
+
+        CrossProjectComparisonVO.Aggregates aggregates = new CrossProjectComparisonVO.Aggregates();
+        aggregates.setMax(new BigDecimal("2000000"));
+        aggregates.setMin(new BigDecimal("1000000"));
+        aggregates.setSum(new BigDecimal("3000000"));
+        aggregates.setAvg(new BigDecimal("1500000.0000"));
+        aggregates.setCount(2);
+
+        ProjectStructuredFactsVO.ValueItem excludedValue = new ProjectStructuredFactsVO.ValueItem();
+        excludedValue.setRawValue("300万");
+        excludedValue.setNormalizedValue("3000000");
+        excludedValue.setUnit("万元");
+        excludedValue.setSourceFileName("预算说明书.pdf");
+        excludedValue.setSourcePage(3);
+        CrossProjectComparisonVO.ExcludedUnit excluded = new CrossProjectComparisonVO.ExcludedUnit();
+        excluded.setReason("CONFLICT");
+        excluded.setProjectId(1785900001L);
+        excluded.setProjectName("示范项目");
+        excluded.setProjectFormId(1785600001L);
+        excluded.setFieldCode("total_investment");
+        excluded.getValues().add(excludedValue);
+
+        CrossProjectComparisonVO comparison = new CrossProjectComparisonVO();
+        comparison.setFieldCode("total_investment");
+        comparison.setFieldName("总投资金额");
+        comparison.setFieldType("DECIMAL");
+        comparison.setCurrentProjectId(1785900001L);
+        comparison.getTargetProjectIds().add(1785900002L);
+        comparison.setAggregates(aggregates);
+        comparison.getUnits().add(unit);
+        comparison.getExcluded().add(excluded);
+        return comparison;
     }
 }

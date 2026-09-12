@@ -2,6 +2,8 @@ package com.aifp.aiagent.service;
 
 import com.aifp.aiagent.dto.*;
 
+import java.util.List;
+
 /**
  * 项目管理服务
  * <p>
@@ -77,4 +79,16 @@ public interface ProjectService {
      * @param fileId    文件记录ID
      */
     void dissociateFile(Long projectId, Long fileId);
+
+    /**
+     * 全量项目 ID 清单（非分页；Phase 10 跨项目比较的可访问项目集合来源）。
+     * <p>
+     * 需求 §三十五：跨项目查询必须基于"当前用户可访问项目集合"，禁止全库裸查。
+     * 当前无用户体系（{@link ProjectAccessService} 默认放行），本方法即全部项目；
+     * 接入用户体系后由权限过滤收窄。id 升序保证输出稳定。
+     * 当前版本限制：非分页全量返回，与 PageQuery 上限策略无关（项目量级可控）。
+     *
+     * @return 项目 ID 列表（id 升序）
+     */
+    List<Long> listAllProjectIds();
 }

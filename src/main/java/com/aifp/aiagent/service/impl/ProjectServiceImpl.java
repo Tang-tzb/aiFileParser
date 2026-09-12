@@ -123,6 +123,17 @@ public class ProjectServiceImpl implements ProjectService {
         fileService.dissociateFromProject(projectId, fileId);
     }
 
+    @Override
+    public List<Long> listAllProjectIds() {
+        // 需求 §三十五：跨项目比较的可访问项目集合来源（当前无用户体系=全部项目）；
+        // id 升序保证输出稳定；@TableLogic 自动过滤已删项目
+        return projectMapper.selectList(new LambdaQueryWrapper<Project>()
+                        .orderByAsc(Project::getId))
+                .stream()
+                .map(Project::getId)
+                .toList();
+    }
+
     // ==================== 内部方法 ====================
 
     /**

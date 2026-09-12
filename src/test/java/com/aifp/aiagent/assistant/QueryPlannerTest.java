@@ -82,6 +82,20 @@ class QueryPlannerTest {
     }
 
     /**
+     * COMPARISON（Phase 10）：仅 RAG（解释依据，追加约束 11）——单项目全量 facts
+     * 关闭，字段级事实由 ProjectComparisonService 内部按事实单元拉取（追加约束 4）
+     */
+    @Test
+    void comparison_ragOnlyWithoutFactsOrFiles() {
+        AssistantQueryPlan plan = planner.buildPlan(AssistantIntent.COMPARISON);
+
+        assertThat(plan.getIntent()).isEqualTo(AssistantIntent.COMPARISON);
+        assertThat(plan.isFetchFacts()).isFalse();
+        assertThat(plan.isFetchRag()).isTrue();
+        assertThat(plan.isFetchFiles()).isFalse();
+    }
+
+    /**
      * UNSUPPORTED 非法入计划：必须由编排层在意图识别后立即短路（追加约束 5），
      * 进入计划即编码缺陷，快速失败
      */

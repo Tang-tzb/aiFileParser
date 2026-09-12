@@ -1,6 +1,10 @@
 package com.aifp.aiagent.service;
 
+import com.aifp.aiagent.dto.ProjectFieldDictionaryVO;
+import com.aifp.aiagent.dto.ProjectFieldFactVO;
 import com.aifp.aiagent.dto.ProjectStructuredFactsVO;
+
+import java.util.List;
 
 /**
  * 项目结构化事实查询服务（需求 §二十一 Structured Query，Phase 7）
@@ -31,4 +35,31 @@ public interface ProjectQueryService {
      * @return 项目结构化事实聚合（无表单实例/字段值时返回空结构，非错误）
      */
     ProjectStructuredFactsVO queryProjectFacts(Long projectId);
+
+    /**
+     * 跨项目字段字典（Phase 10 Comparison / Ranking / Aggregation）。
+     * <p>
+     * 可访问项目集合内 fieldCode 快照去重投影（form id 升序第一为准），
+     * 供 ComparisonSlotExtractor 做字段定位；后端以字典成员资格校验槽位
+     * （追加约束 9/12）。仅 ACTIVE 实例；无实例/值时返回空列表，非错误。
+     *
+     * @param projectIds 项目ID集合（非空、不含 null，允许乱序自动去重；
+     *                   逐项目经 ProjectService 守门 403/6001）
+     * @return 字段字典项（fieldCode 升序）
+     */
+    List<ProjectFieldDictionaryVO> queryFieldDictionary(List<Long> projectIds);
+
+    /**
+     * 跨项目字段事实查询单字段（Phase 10；事实单元 = (projectId, projectFormId, fieldCode)，
+     * 追加约束 4：不同表单实例独立输出，同项目多实例分别成单元）。
+     * <p>
+     * 仅 ACTIVE 实例；实例无该字段值时输出空 values 单元（不省略，供
+     * "项目X 未提供该字段数据"解释与追加约束 12 无据判定）；冲突判定复用
+     * {@link FieldValueConflictResolver}，conflict=true 完整保留全部来源值（追加约束 5）。
+     *
+     * @param projectIds 项目ID集合（非空、不含 null；逐项目经 ProjectService 守门 403/6001）
+     * @param fieldCode  字段编码（非空白）
+     * @return 字段事实单元列表（form id 升序）
+     */
+    List<ProjectFieldFactVO> queryFieldFacts(List<Long> projectIds, String fieldCode);
 }
