@@ -13,6 +13,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -106,14 +107,18 @@ public class DocumentChunker {
         // 元数据值类型保持与原字段语义一致：文本类用 String，数值类用 Integer，
         // 便于 Milvus 元数据过滤及后续 AI Prompt 生成时保留数值语义。
         // fileId 存为 String，便于 Milvus 标量过滤表达式 file == 'xxx'。
-        Map<String, Object> chunkMeta = Map.of(
-                "fileName", nullSafe(meta.getFileName()),
-                "fileType", nullSafe(meta.getType()),
-                "page", meta.getPage(),
-                "fileId", nullSafe(meta.getFileId()),
-                "chunkIndex", chunkIndex,
-                "totalChunks", totalChunks
-        );
+        Map<String, Object> chunkMeta = new LinkedHashMap<>();
+        chunkMeta.put("fileName", nullSafe(meta.getFileName()));
+        chunkMeta.put("fileType", nullSafe(meta.getType()));
+        chunkMeta.put("page", meta.getPage());
+        chunkMeta.put("fileId", nullSafe(meta.getFileId()));
+        chunkMeta.put("chunkIndex", chunkIndex);
+        chunkMeta.put("totalChunks", totalChunks);
+        // projectId 与 fileId 同为 String 便于 Milvus 标量过滤；null（历史文件）省略键，
+        // 与 ChunkVectorConverter 的"null 键省略"约定一致（区别于 fileId 的 nullSafe 行为，历史行为不改动）
+        if (meta.getProjectId() != null) {
+            chunkMeta.put("projectId", meta.getProjectId().toString());
+        }
         return new org.springframework.ai.document.Document(text, chunkMeta);
     }
 

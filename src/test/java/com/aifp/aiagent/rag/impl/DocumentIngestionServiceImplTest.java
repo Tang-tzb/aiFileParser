@@ -20,6 +20,7 @@ import com.aifp.aiagent.service.storage.FileStorageService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -30,9 +31,9 @@ import java.io.File;
 import java.nio.file.Path;
 import java.util.List;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 /**
@@ -48,6 +49,7 @@ import static org.mockito.Mockito.*;
 class DocumentIngestionServiceImplTest {
 
     private static final Long FILE_ID = 1785800001L;
+    private static final Long PROJECT_ID = 1785900001L;
 
     @TempDir
     Path tempDir;
@@ -109,7 +111,7 @@ class DocumentIngestionServiceImplTest {
                 .thenReturn(DocumentAst.builder().fileName("样例.pdf").build());
         when(hybridSemanticChunker.chunk(any(DocumentAst.class), eq(FILE_ID)))
                 .thenReturn(List.of(Chunk.builder().content("块内容").build()));
-        when(chunkVectorConverter.convert(any()))
+        when(chunkVectorConverter.convert(any(), isNull()))
                 .thenReturn(List.of(new Document("向量化内容")));
 
         ingestionService.ingest(FILE_ID);
@@ -119,13 +121,62 @@ class DocumentIngestionServiceImplTest {
         inOrder.verify(fileService).updateStatus(FILE_ID, FileStatus.PARSING);
         inOrder.verify(structured).parseStructured(any(File.class));
         inOrder.verify(hybridSemanticChunker).chunk(any(DocumentAst.class), eq(FILE_ID));
-        inOrder.verify(chunkVectorConverter).convert(any());
+        inOrder.verify(chunkVectorConverter).convert(any(), isNull());
         inOrder.verify(fileService).updateStatus(FILE_ID, FileStatus.VECTORING);
         inOrder.verify(vectorStoreService).store(any());
         // 阶段 13：ingest 停在 VECTORING，不落 SUCCESS
         verify(fileService, never()).updateStatus(eq(FILE_ID), eq(FileStatus.SUCCESS));
         // 结构链路不得触碰旧滑窗切片器
         verify(documentChunker, never()).chunk(any(ParserDocument.class));
+    }
+
+    /**
+     * Phase 5：文件已绑定项目（Phase 2 权威归属）时，结构化链路将 projectId
+     * 透传给 ChunkVectorConverter（2-arg），metadata 写入 projectId。
+     */
+    @Test
+    void ingest_structured_withProjectId_converterReceivesProjectId() throws Exception {
+        FileParser structuredAsParser = mock(FileParser.class,
+                withSettings().extraInterfaces(StructuredFileParser.class));
+        StructuredFileParser structured = (StructuredFileParser) structuredAsParser;
+        when(fileService.getById(FILE_ID)).thenReturn(buildRecord(FileStatus.UPLOADED, PROJECT_ID));
+        when(fileStorageService.load(any())).thenReturn(resource);
+        when(resource.getFile()).thenReturn(tempDir.resolve("p.pdf").toFile());
+        when(fileParserRegistry.get(FileType.PDF)).thenReturn(structuredAsParser);
+        when(structured.parseStructured(any(File.class)))
+                .thenReturn(DocumentAst.builder().fileName("样例.pdf").build());
+        when(hybridSemanticChunker.chunk(any(DocumentAst.class), eq(FILE_ID)))
+                .thenReturn(List.of(Chunk.builder().content("块内容").build()));
+        when(chunkVectorConverter.convert(any(), eq(PROJECT_ID)))
+                .thenReturn(List.of(new Document("向量化内容")));
+
+        ingestionService.ingest(FILE_ID);
+
+        verify(chunkVectorConverter).convert(any(), eq(PROJECT_ID));
+        verify(vectorStoreService).store(any());
+    }
+
+    /**
+     * Phase 5：旧全文链路经 ParserDocumentMetadata 注入 projectId（与 fileId 注入对称），
+     * 解析器不感知，切片器按 metadata 写入 chunk。
+     */
+    @Test
+    void ingest_legacy_withProjectId_metadataCarriesProjectId() throws Exception {
+        when(fileService.getById(FILE_ID)).thenReturn(buildRecord(FileStatus.UPLOADED, PROJECT_ID));
+        when(fileStorageService.load(any())).thenReturn(resource);
+        when(resource.getFile()).thenReturn(tempDir.resolve("a.pdf").toFile());
+        when(fileParserRegistry.get(FileType.PDF)).thenReturn(fileParser);
+        when(fileParser.parse(any(File.class))).thenReturn(buildDoc());
+        when(documentChunker.chunk(any(ParserDocument.class)))
+                .thenReturn(List.<Document>of(new Document("chunk1")));
+
+        ingestionService.ingest(FILE_ID);
+
+        ArgumentCaptor<ParserDocument> captor = ArgumentCaptor.forClass(ParserDocument.class);
+        verify(documentChunker).chunk(captor.capture());
+        assertThat(captor.getValue().getMetadata().getProjectId()).isEqualTo(PROJECT_ID);
+        assertThat(captor.getValue().getMetadata().getFileId()).isEqualTo(FILE_ID);
+        verify(vectorStoreService).store(any());
     }
 
     @Test
@@ -219,12 +270,17 @@ class DocumentIngestionServiceImplTest {
     }
 
     private FileRecordVO buildRecord(FileStatus status) {
+        return buildRecord(status, null);
+    }
+
+    private FileRecordVO buildRecord(FileStatus status, Long projectId) {
         FileRecordVO vo = new FileRecordVO();
         vo.setFileId(FILE_ID);
         vo.setFileName("项目申报书.pdf");
         vo.setFileType(FileType.PDF);
         vo.setFilePath("2026/07/abc.pdf");
         vo.setStatus(status);
+        vo.setProjectId(projectId);
         return vo;
     }
 

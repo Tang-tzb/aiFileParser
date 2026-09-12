@@ -82,4 +82,41 @@ class ChunkVectorConverterTest {
         assertThat(converter.convert(java.util.Arrays.asList(
                 null, Chunk.builder().content("  ").build()))).isEmpty();
     }
+
+    /**
+     * Phase 5：2-arg 重载注入文件级 projectId metadata（String，与 fileId 约定一致）。
+     */
+    @Test
+    void convert_withProjectId_metadataContainsProjectId() {
+        Chunk chunk = Chunk.builder()
+                .content("块内容")
+                .fileId("1785800001")
+                .chunkType(ChunkType.PARAGRAPH)
+                .chunkIndex(0)
+                .totalChunks(1)
+                .build();
+
+        List<Document> documents = converter.convert(List.of(chunk), 1785900001L);
+
+        assertThat(documents.get(0).getMetadata())
+                .containsEntry("projectId", "1785900001")
+                .containsEntry("fileId", "1785800001");
+    }
+
+    /**
+     * Phase 5：projectId 为 null（历史文件）时省略键，产物与历史 chunk 一致（§三十一）。
+     */
+    @Test
+    void convert_nullProjectId_keyOmitted() {
+        Chunk chunk = Chunk.builder()
+                .content("块内容")
+                .fileId("1785800001")
+                .chunkType(ChunkType.PARAGRAPH)
+                .chunkIndex(0)
+                .totalChunks(1)
+                .build();
+
+        assertThat(converter.convert(List.of(chunk), null).get(0).getMetadata())
+                .doesNotContainKey("projectId");
+    }
 }

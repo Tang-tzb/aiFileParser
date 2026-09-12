@@ -78,12 +78,45 @@ class DocumentChunkerTest {
         assertThat(chunks.get(1).getText()).isNotBlank();
     }
 
+    /**
+     * Phase 5：ParserDocumentMetadata 携带 projectId 时写入 metadata（String，与 fileId 一致）。
+     */
+    @Test
+    void chunk_withProjectId_metadataContainsProjectId() {
+        ParserDocument doc = buildDoc("项目名称为智慧校园，投资金额500万。", 1785900001L);
+
+        List<org.springframework.ai.document.Document> chunks = chunker.chunk(doc);
+
+        assertThat(chunks).hasSize(1);
+        assertThat(chunks.get(0).getMetadata())
+                .containsEntry("projectId", "1785900001")
+                .containsEntry("fileId", FILE_ID.toString());
+    }
+
+    /**
+     * Phase 5：projectId 为 null（历史文件）时省略键，产物与历史 chunk 一致（§三十一）。
+     */
+    @Test
+    void chunk_nullProjectId_keyOmitted() {
+        ParserDocument doc = buildDoc("无项目归属的历史文件内容。");
+
+        List<org.springframework.ai.document.Document> chunks = chunker.chunk(doc);
+
+        assertThat(chunks).hasSize(1);
+        assertThat(chunks.get(0).getMetadata()).doesNotContainKey("projectId");
+    }
+
     private ParserDocument buildDoc(String content) {
+        return buildDoc(content, null);
+    }
+
+    private ParserDocument buildDoc(String content, Long projectId) {
         ParserDocumentMetadata meta = ParserDocumentMetadata.builder()
                 .fileName("项目申报书.pdf")
                 .page(3)
                 .type(FileType.PDF)
                 .fileId(FILE_ID)
+                .projectId(projectId)
                 .build();
         ParserDocument doc = new ParserDocument();
         doc.setContent(content);

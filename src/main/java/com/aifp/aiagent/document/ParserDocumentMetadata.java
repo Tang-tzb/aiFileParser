@@ -48,4 +48,13 @@ public class ParserDocumentMetadata implements Serializable {
      * 用于 chunk 元数据写入，供检索阶段按文件过滤。
      */
     private Long fileId;
+
+    /**
+     * 所属项目ID（project 主键）
+     * <p>
+     * 由 DocumentIngestionService 在入库前从 FileRecord 注入，解析器不感知该字段。
+     * null 表示历史文件无项目归属，chunk metadata 省略 projectId 键（§三十一 历史兼容）。
+     * 用于 chunk metadata 写入，供后续项目范围检索（Phase 6）过滤。
+     */
+    private Long projectId;
 }
